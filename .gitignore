@@ -3,5 +3,5 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
-dashboard.html
+/dashboard.html
 /demo/
