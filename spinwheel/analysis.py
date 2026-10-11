@@ -19,6 +19,7 @@ from typing import Any
 from . import audience as audience_mod
 from . import ideas as ideas_mod
 from . import keywords as keywords_mod
+from . import patterns as patterns_mod
 from . import topics as topics_mod
 
 MATURE_DAYS = 14
@@ -51,11 +52,12 @@ DURATION_BUCKETS = [
 ]
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-_QUESTION_START = re.compile(r"^(how|why|what|when|which|can|should|is|are|do|does|will)\b", re.I)
 
 TITLE_FEATURES: list[tuple[str, Any]] = [
     ("Has a number", lambda t: bool(re.search(r"\d", t))),
-    ("Asks a question", lambda t: "?" in t or bool(_QUESTION_START.match(t.strip()))),
+    ("Numbered list (7 tips, top 10)", patterns_mod.is_numbered),
+    ("Comparison (vs / versus)", patterns_mod.is_comparison),
+    ("Asks a question", patterns_mod.is_question),
     ("45 characters or fewer", lambda t: len(t) <= 45),
     ("Has brackets or parentheses", lambda t: bool(re.search(r"[\[\(]", t))),
     ("Has an ALL-CAPS word", lambda t: bool(re.search(r"\b[A-Z]{3,}\b", t))),
@@ -259,10 +261,15 @@ def analyze_channel(vids: list[dict], subs: int | None = None, mode: str = "all"
         w = [v for v in mature if fn(v["title"])]
         wo = [v for v in mature if not fn(v["title"])]
         mw, mo = _med([v["views"] for v in w]), _med([v["views"] for v in wo])
+        aw = sum(v["views"] for v in w) / len(w) if w else None
+        ao = sum(v["views"] for v in wo) / len(wo) if wo else None
         ok = len(w) >= MIN_GROUP and len(wo) >= MIN_GROUP
         features.append({"label": name, "n_with": len(w), "n_without": len(wo),
                          "median_with": mw, "median_without": mo,
-                         "lift": _lift(mw, mo) if ok else None})
+                         "lift": _lift(mw, mo) if ok else None,
+                         # the outlier-finder page defines lift on averages; the median is used for the bars and
+                         # findings because one hit can swing an average
+                         "avg_with": aw, "avg_without": ao, "avg_lift": _lift(aw, ao) if ok else None})
 
     # topics: phrases from titles and tags
     topics_all = topics_mod.channel_topics(mature, base)
@@ -490,7 +497,8 @@ def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_sna
     for v in subset:                       # internal helpers, not for the page
         v.pop("_phrases", None)
     channels.sort(key=lambda c: (-c["n_videos"], c["title"]))
-    return {"channels": channels, "detail": detail, "breakouts": _breakouts(detail), "topics": topics_tracked}
+    return {"channels": channels, "detail": detail, "breakouts": _breakouts(detail), "topics": topics_tracked,
+            "patterns": patterns_mod.build(subset)}
 
 
 def _compare_channel_sizes(channels: list[dict], detail: dict) -> None:

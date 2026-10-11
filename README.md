@@ -76,6 +76,16 @@ Subscriber counts are also refreshed per channel (`spinwheel channels`, run auto
 
 Honest limits: in testing from a cloud server, per-video enrichment was blocked for most videos, while the flat search and channel refresh always worked. Without a publish date a video still counts for tiers, views and topics, but not for age-based analysis (it shows "no date" instead of a score). Run from your own machine, or pass cookies, for fuller results. The YouTube Data API is not needed; if you use it instead, its `search.list` output ingests, but the query mapping is only recorded by `search`.
 
+## Patterns across tracked channels
+
+Under **Content ideas**, three cards look across *all* tracked channels in the current format slice:
+
+- **Title structures in high-tier videos.** Every title gets one structure, first match wins: *comparison* (vs / versus / compared to), *question* (a `?`, or why / what / is / can / how do...), *numbered list* ("7 tips", "top 10"), *how-to* ("how to", tutorial, guide, step-by-step), *personal story* (I / my / we), else *other*. The table compares each structure's share among HOT / OUTLIER / FIRE videos with its share of all videos; over 1.0× means it turns up in high-tier videos more than chance. "How to..." is a how-to and "How I..." a story; only "how do / can / much..." counts as a question.
+- **Top titles by raw views**, with their tiers, so you can see how often the most-viewed video is simply the biggest channel's.
+- **Small channels punching above their weight.** FIRE and OUTLIER videos from channels under 100,000 subscribers (the source page doesn't define "small"; the limit is `SMALL_CHANNEL_SUBS` in `spinwheel/patterns.py`), most views per subscriber first, with what they share: title structures, median length, how many are Shorts, and repeated phrases.
+
+The **title pattern** chart gained *numbered list* and *comparison* patterns. Its bars use the median-based lift (one hit can swing an average); the source page defines lift on averages, so the average-based lift is in each bar's tooltip and in the chart's Table view.
+
 ## Keyword research
 
 The **Keyword research** section starts with **Tracked topics**: every keyword you've searched with `spinwheel search`, with the videos that search surfaced. It follows the formulas of the [YouTube Outlier Finder](https://chadesheppard.com/videos/youtube-outlier-finder); the page leaves several terms undefined, so these are the choices made here:
