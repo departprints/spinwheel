@@ -14,6 +14,7 @@ from __future__ import annotations
 import shlex
 import sqlite3
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -25,7 +26,20 @@ FIELDS = ("id,title,description,timestamp,upload_date,duration,view_count,like_c
 ENRICH_BATCH = 25
 
 
-def search_command(query: str, n: int, yt_dlp: str = "yt-dlp", extra: list[str] | None = None) -> list[str]:
+# YouTube's own "Upload date" search filters (the `sp` parameter of a results URL). Everything such a
+# search returns was uploaded inside the window, which is how a publish date is bounded without
+# asking for any per-video page.
+WITHIN_SP = {"today": "EgQIAhAB", "week": "EgQIAxAB", "month": "EgQIBBAB", "year": "EgQIBRAB"}
+WITHIN_DAYS = {"today": 1, "week": 7, "month": 31, "year": 366}
+
+
+def search_command(query: str, n: int, yt_dlp: str = "yt-dlp", extra: list[str] | None = None,
+                   within: str | None = None) -> list[str]:
+    if within:
+        if within not in WITHIN_SP:
+            raise ValueError(f"within must be one of {', '.join(WITHIN_SP)}")
+        url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}&sp={WITHIN_SP[within]}"
+        return [yt_dlp, "-J", "--flat-playlist", "--playlist-end", str(n), *(extra or []), url]
     return [yt_dlp, "-J", "--flat-playlist", *(extra or []), f"ytsearch{n}:{query}"]
 
 
@@ -45,7 +59,7 @@ def tracked_topics(conn: sqlite3.Connection) -> list[str]:
 
 
 def search(conn: sqlite3.Connection, queries: list[str], *, max_results: int = 20, fast: bool = False,
-           delay: float = 3.0, yt_dlp: str = "yt-dlp", extra: list[str] | None = None, runner: Runner = run_command,
+           within: str | None = None, delay: float = 3.0, yt_dlp: str = "yt-dlp", extra: list[str] | None = None, runner: Runner = run_command,
            sleep: Callable[[float], None] = time.sleep,
            on_progress: Callable[[str], None] = lambda s: None) -> dict:
     """Run each keyword search. Returns {query: {found, enriched}} plus failures."""
@@ -53,7 +67,7 @@ def search(conn: sqlite3.Connection, queries: list[str], *, max_results: int = 2
     for i, q in enumerate(dict.fromkeys(x.strip() for x in queries if x.strip())):
         if i:
             sleep(delay)
-        cmd = search_command(q, max_results, yt_dlp, extra)
+        cmd = search_command(q, max_results, yt_dlp, extra, within)
         try:
             code, out, err = runner(cmd)
         except OSError as e:
@@ -64,7 +78,7 @@ def search(conn: sqlite3.Connection, queries: list[str], *, max_results: int = 2
             on_progress(f"  {q}: FAILED ({failed[q]})")
             continue
         try:
-            r = ingest_text(conn, out, command=shlex.join(cmd), search_query=q)
+            r = ingest_text(conn, out, command=shlex.join(cmd), search_query=q, within=within)
         except ValueError as e:
             failed[q] = str(e)
             on_progress(f"  {q}: FAILED ({e})")

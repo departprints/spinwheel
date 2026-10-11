@@ -12,7 +12,7 @@ import math
 import re
 import sqlite3
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Any
 
@@ -138,7 +138,41 @@ def classify_format(snaps, short_max: int = SHORT_MAX_SECONDS) -> tuple[str, str
     return "long", "none"
 
 
-def _build_videos(v_rows, short_max: int = SHORT_MAX_SECONDS) -> dict[str, dict]:
+WINDOW_DAYS = {"today": 1, "week": 7, "month": 31, "year": 366}
+
+
+def _windows(conn: sqlite3.Connection) -> dict[str, dict]:
+    """video_id -> bounds on its publish date, from upload-date-filtered searches that surfaced it.
+    Appearing under "uploaded today" at time T means published within the 24 hours before T. Several
+    sightings combine: the latest tells how old it can be, the earliest how new it must be."""
+    out: dict[str, dict] = {}
+    for r in conn.execute("SELECT video_id, within, MIN(captured_at) AS first, MAX(captured_at) AS last FROM searches "
+                          "WHERE within IS NOT NULL GROUP BY video_id, within"):
+        days = WINDOW_DAYS.get(r["within"])
+        if not days:
+            continue
+        after = (parse_ts(r["last"]) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cur = out.get(r["video_id"])
+        if cur is None:
+            out[r["video_id"]] = {"after": after, "before": r["first"], "within": r["within"]}
+        else:                      # intersect the windows from different filters
+            cur["after"] = max(cur["after"], after)
+            cur["before"] = min(cur["before"], r["first"])
+            if days < WINDOW_DAYS[cur["within"]]:
+                cur["within"] = r["within"]
+    return out
+
+
+def _labels(conn: sqlite3.Connection) -> dict[str, dict]:
+    """channel_id -> its most recent label."""
+    out: dict[str, dict] = {}
+    for r in conn.execute("SELECT * FROM channel_labels ORDER BY captured_at, id"):
+        out[r["channel_id"]] = {"label": r["label"], "source": r["source"], "note": r["note"], "at": r["captured_at"][:10]}
+    return out
+
+
+def _build_videos(v_rows, short_max: int = SHORT_MAX_SECONDS, windows: dict | None = None,
+                  ref: datetime | None = None) -> dict[str, dict]:
     by_vid: dict[str, list] = defaultdict(list)
     for r in v_rows:
         by_vid[r["video_id"]].append(r)
@@ -182,8 +216,17 @@ def _build_videos(v_rows, short_max: int = SHORT_MAX_SECONDS) -> dict[str, dict]
                 prev_title = s["title"]
 
         fmt, basis = classify_format(snaps, short_max)
+        win = (windows or {}).get(vid)
+        # Newest the video can be is bounded by a real date, else by the upload-date filter that surfaced it.
+        if pub_dt and ref:
+            age_max = (_days(ref, pub_dt) + (1 if len(pub) == 10 else 0))      # a bare date: count the whole day
+        elif win and ref:
+            age_max = _days(ref, parse_ts(win["after"]))
+        else:
+            age_max = None
         videos[vid] = {
             "id": vid, "channel_id": cid, "title": title, "format": fmt, "format_basis": basis,
+            "age_max_days": age_max, "window": win["within"] if win and not pub_dt else None,
             "published": pub, "age_days": age,
             "duration_s": next((s["duration_s"] for s in reversed(snaps) if s["duration_s"] is not None), None),
             "views": views, "likes": likes, "comments": comments,
@@ -369,7 +412,9 @@ def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SE
     only. Each slice is analysed on its own (its own medians, outliers, topics, gaps, ideas), because a
     Short's views say nothing about how a ten-minute video is doing."""
     v_rows, c_rows, pulls = _load(conn)
-    videos = _build_videos(v_rows, short_max)
+    ref = parse_ts(max([r["captured_at"] for r in v_rows] + [r["captured_at"] for r in c_rows])) \
+        if (v_rows or c_rows) else None
+    videos = _build_videos(v_rows, short_max, _windows(conn), ref)
     history = {vid: v.pop("history") for vid, v in videos.items()}     # shared by all slices, sent once
 
     ch_snaps: dict[str, list] = defaultdict(list)
@@ -377,8 +422,6 @@ def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SE
         ch_snaps[r["channel_id"]].append(r)
     channel_ids = sorted({v["channel_id"] for v in videos.values()} | set(ch_snaps))
 
-    ref = parse_ts(max([r["captured_at"] for r in v_rows] + [r["captured_at"] for r in c_rows])) \
-        if (v_rows or c_rows) else None
     suggestions = _suggestions(conn)
 
     comment_summaries, asks_by_video = {}, {}
@@ -390,10 +433,18 @@ def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SE
         v["has_comments"] = vid in comment_summaries
 
     searches = _searches(conn)
+    labels = _labels(conn)
+    for v in videos.values():
+        v["found_under"] = []
+    for topic, ids in searches.items():          # which tracked topics surfaced each video
+        for vid in ids:
+            if vid in videos and len(videos[vid]["found_under"]) < 3:
+                videos[vid]["found_under"].append(topic)
+    overview = _overview(conn, videos, labels, searches, comment_summaries)
     variants = {}
     for mode in FORMATS:
         subset = [dict(v) for v in videos.values() if mode == "all" or v["format"] == mode]
-        variants[mode] = _build_variant(mode, subset, channel_ids, ch_snaps, ref, suggestions, asks_by_video, searches)
+        variants[mode] = _build_variant(mode, subset, channel_ids, ch_snaps, ref, suggestions, asks_by_video, searches, labels)
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -405,6 +456,7 @@ def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SE
         "keyword_min_titles": keywords_mod.MIN_TITLES, "comment_min_views": 10_000, "short_max": short_max, "format_basis": dict(Counter(v["format_basis"] for v in videos.values())),
         "formats": [{"id": m, "label": FORMAT_LABELS[m]} for m in FORMATS],
         "variants": variants, "history": history, "suggestions": suggestions, "comments": comment_summaries,
+        "overview": overview,
     }
 
 
@@ -420,6 +472,33 @@ def _latest_comments(conn: sqlite3.Connection) -> dict[str, list]:
     return out
 
 
+def _overview(conn: sqlite3.Connection, videos: dict, labels: dict, searches: dict, comment_summaries: dict) -> dict:
+    """What is in the database and how complete it is: the 'Data' page."""
+    q = lambda sql: conn.execute(sql).fetchone()[0]
+    windows = _windows(conn)
+    dated = sum(1 for v in videos.values() if v["published"])
+    bounded = sum(1 for vid, v in videos.items() if not v["published"] and vid in windows)
+    titles = {}
+    for r in conn.execute("SELECT channel_id, title FROM channel_snapshots WHERE title IS NOT NULL ORDER BY captured_at, id"):
+        titles[r["channel_id"]] = r["title"]
+    runs = conn.execute("SELECT query, COUNT(DISTINCT video_id) AS videos, COUNT(DISTINCT pull_id) AS runs, "
+                        "MAX(captured_at) AS last, GROUP_CONCAT(DISTINCT within) AS within FROM searches "
+                        "GROUP BY query ORDER BY MAX(captured_at) DESC").fetchall()
+    return {
+        "videos": len(videos), "dated": dated, "bounded": bounded, "undated": len(videos) - dated - bounded,
+        "channels": q("SELECT COUNT(DISTINCT channel_id) FROM (SELECT channel_id FROM video_snapshots WHERE channel_id IS NOT NULL "
+                      "UNION SELECT channel_id FROM channel_snapshots)"),
+        "with_subs": q("SELECT COUNT(DISTINCT channel_id) FROM channel_snapshots WHERE subscribers IS NOT NULL"),
+        "labelled": {k: sum(1 for x in labels.values() if x["label"] == k) for k in ("faceless", "face", "unsure")},
+        "comment_videos": len(comment_summaries), "comments": q("SELECT COUNT(*) FROM comment_snapshots"),
+        "topics": [{"topic": r["query"], "videos": r["videos"], "runs": r["runs"], "last": r["last"],
+                    "within": sorted((r["within"] or "").split(",")) if r["within"] else []} for r in runs],
+        "pulls": [{"at": r["pulled_at"], "source": r["source"], "command": (r["command"] or "")[:160]}
+                  for r in conn.execute("SELECT pulled_at, source, command FROM pulls ORDER BY id DESC LIMIT 15")],
+        "labels": [{"channel_id": cid, "title": titles.get(cid, cid), **lab} for cid, lab in labels.items()],
+    }
+
+
 def _searches(conn: sqlite3.Connection) -> dict[str, list[str]]:
     """topic -> the videos that keyword search ever surfaced, best rank first."""
     out: dict[str, list[str]] = defaultdict(list)
@@ -430,7 +509,7 @@ def _searches(conn: sqlite3.Connection) -> dict[str, list[str]]:
 
 
 def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_snaps: dict, ref, suggestions: dict,
-                   asks_by_video: dict, searches: dict) -> dict:
+                   asks_by_video: dict, searches: dict, labels: dict | None = None) -> dict:
     by_channel: dict[str, list[dict]] = defaultdict(list)
     for v in subset:
         by_channel[v["channel_id"]].append(v)
@@ -465,7 +544,7 @@ def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_sna
             "median_engagement": a["median_engagement"], "uploads_90d": recent_uploads,
             "views_per_sub": a["median_views"] / subs if subs and a["median_views"] else None,
             "size_ratio": None, "size_ref": None, "size_outlier": None,
-            "format": FORMAT_LABELS[mode],
+            "format": FORMAT_LABELS[mode], "label": (labels or {}).get(cid),
             "last_pulled": max([s["captured_at"] for s in snaps] +
                                [v["captured_at"] for v in a["videos"]] or [""]),
         })
@@ -496,7 +575,7 @@ def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_sna
     topics_tracked = keywords_mod.tracked_topics({v["id"]: v for v in subset}, searches, suggestions, ref, parse_ts)
     for v in subset:                       # internal helpers, not for the page
         v.pop("_phrases", None)
-    channels.sort(key=lambda c: (-c["n_videos"], c["title"]))
+    channels.sort(key=lambda c: (c["id"] == UNKNOWN_CHANNEL, -c["n_videos"], c["title"]))    # collaborations have no single channel: last
     return {"channels": channels, "detail": detail, "breakouts": _breakouts(detail), "topics": topics_tracked,
             "patterns": patterns_mod.build(subset)}
 

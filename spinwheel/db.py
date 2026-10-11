@@ -8,7 +8,9 @@ Layout:
   channel_snapshots one row per channel per pull: subscribers, total views, ...
   search_suggestions YouTube autocomplete results per fetch, so new phrases can be spotted over time
   comment_snapshots  top-level comments per fetch with their like counts at that moment
-  searches           which video appeared for which keyword search (topic discovery), and at what rank
+  searches           which video appeared for which keyword search (topic discovery), and at what rank;
+                     `within` records an upload-date filter (today / week / ...), which bounds the publish date
+  channel_labels     judgments about a channel (e.g. faceless), each with who/what made it and when
 
 Snapshot, payload and pull tables are protected by triggers that abort UPDATE and
 DELETE, so "not overwritten" is enforced by the database, not by convention.
@@ -102,9 +104,20 @@ CREATE TABLE IF NOT EXISTS searches (
     query       TEXT NOT NULL,           -- the tracked topic (lower-cased keyword search)
     video_id    TEXT NOT NULL REFERENCES videos(video_id),
     rank        INTEGER NOT NULL,        -- 0 = first search result
-    captured_at TEXT NOT NULL
+    captured_at TEXT NOT NULL,
+    within      TEXT                     -- NULL, or the upload-date filter used: today | week | month | year
 );
 CREATE INDEX IF NOT EXISTS idx_searches ON searches(query, captured_at);
+
+CREATE TABLE IF NOT EXISTS channel_labels (
+    id          INTEGER PRIMARY KEY,
+    channel_id  TEXT NOT NULL,
+    label       TEXT NOT NULL,           -- 'faceless' | 'face' | 'unsure'
+    source      TEXT NOT NULL,           -- 'manual' | 'thumbnail-review'
+    note        TEXT,
+    captured_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_labels ON channel_labels(channel_id, captured_at);
 
 CREATE TABLE IF NOT EXISTS search_suggestions (
     id          INTEGER PRIMARY KEY,
@@ -119,7 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_sugg ON search_suggestions(seed, captured_at);
 
 # Tables whose rows may never be modified or removed once written.
 _PROTECTED = ("pulls", "raw_payloads", "channel_snapshots", "video_snapshots", "videos", "channels",
-              "search_suggestions", "comment_snapshots", "searches")
+              "search_suggestions", "comment_snapshots", "searches", "channel_labels")
 
 
 def _guards() -> str:
@@ -136,7 +149,8 @@ def _guards() -> str:
 # Columns added after the first release. Adding a column is not an UPDATE, so history stays untouched;
 # rows stored before the column existed simply read NULL.
 _ADDED_COLUMNS = {"video_snapshots": [("width", "INTEGER"), ("height", "INTEGER"), ("page_url", "TEXT")],
-                  "raw_payloads": [("encoding", "TEXT")]}
+                  "raw_payloads": [("encoding", "TEXT")],
+                  "searches": [("within", "TEXT")]}
 
 
 def _migrate(conn: sqlite3.Connection) -> None:

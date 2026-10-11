@@ -25,7 +25,7 @@ def utc_iso(value: str | datetime | None = None) -> str:
 
 
 def ingest_text(conn: sqlite3.Connection, text: str, *, pulled_at: str | datetime | None = None,
-                command: str | None = None, search_query: str | None = None) -> dict:
+                command: str | None = None, search_query: str | None = None, within: str | None = None) -> dict:
     """Store one pull. With `search_query`, the videos in it are also recorded as that keyword search's
     results, in the order they came back (rank 0 first)."""
     parsed = parse(text)
@@ -73,8 +73,8 @@ def ingest_text(conn: sqlite3.Connection, text: str, *, pulled_at: str | datetim
 
         if search_query and search_query.strip():
             for rank, v in enumerate(parsed.videos):
-                conn.execute("INSERT INTO searches(pull_id, query, video_id, rank, captured_at) VALUES (?,?,?,?,?)",
-                             (pull_id, search_query.strip().lower(), v.video_id, rank, when))
+                conn.execute("INSERT INTO searches(pull_id, query, video_id, rank, captured_at, within) VALUES (?,?,?,?,?,?)",
+                             (pull_id, search_query.strip().lower(), v.video_id, rank, when, within))
 
     return {"pull_id": pull_id, "source": parsed.source, "pulled_at": when,
             "videos": len(parsed.videos), "channels": len(parsed.channels), "comments": len(parsed.comments),

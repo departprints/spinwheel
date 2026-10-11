@@ -7,8 +7,8 @@ import shlex
 import subprocess
 import sys
 
-from . import analysis, comments, dashboard, db, discover, suggest
-from .ingest import ingest_text
+from . import analysis, comments, dashboard, db, discover, suggest, youtube_api
+from .ingest import ingest_text, utc_iso
 
 
 def _report(r: dict) -> None:
@@ -105,9 +105,10 @@ def cmd_search(args) -> int:
         print("usage: spinwheel search \"keyword\" [\"keyword\" ...]  or  --all (re-run every tracked topic)", file=sys.stderr)
         return 2
     print(f"searching YouTube for {len(dict.fromkeys(queries))} topic(s), {args.max_results} results each"
+          + (f", uploaded in the last {args.within}" if args.within else "")
           + (", flat (no publish dates or subscribers)" if args.fast else ""))
-    r = discover.search(conn, queries, max_results=args.max_results, fast=args.fast, delay=args.delay, yt_dlp=args.yt_dlp,
-                        extra=_extra(args), on_progress=print)
+    r = discover.search(conn, queries, max_results=args.max_results, fast=args.fast, within=args.within, delay=args.delay,
+                        yt_dlp=args.yt_dlp, extra=_extra(args), on_progress=print)
     if not args.no_channels and r["done"]:
         todo = discover.stale_channels(conn, refresh_days=args.refresh_days)
         if todo:
@@ -150,6 +151,53 @@ def cmd_enrich(args) -> int:
     print(f"enriched {r['enriched']} of {r['requested']}" + (f"; {r['error']}" if r["error"] else
           "" if r["enriched"] == r["requested"] else ". The rest were refused (YouTube may be asking for a login); retry later or pass --yt-dlp-args"))
     return 0 if r["enriched"] else 1
+
+
+def cmd_label(args) -> int:
+    conn = db.connect(args.db)
+    when = utc_iso()
+    with conn:
+        for cid in args.channels:
+            conn.execute("INSERT INTO channel_labels(channel_id, label, source, note, captured_at) VALUES (?,?,?,?,?)",
+                         (cid, args.label, args.source, args.note, when))
+    print(f"labelled {len(args.channels)} channel(s) as {args.label} ({args.source})")
+    return 0
+
+
+def cmd_api(args) -> int:
+    """The YouTube Data API route: no bot checks, but a daily quota. See youtube_api.py."""
+    conn = db.connect(args.db)
+    try:
+        key = youtube_api.get_key(args.key_env)
+        what = args.what
+        if what == "search":
+            if not args.targets:
+                print('usage: spinwheel api search "keyword" ["keyword" ...] [--within today]', file=sys.stderr)
+                return 2
+            print(f"{len(args.targets)} search(es) cost about {100 * len(args.targets) + 2 * len(args.targets)} quota units")
+            for q in args.targets:
+                r = youtube_api.search(conn, q, key, within=args.within, max_results=args.max_results, order=args.order)
+                print(f"  {q}: {r['found']} videos, {r['enriched']} with dates and stats, {r['channels']} channel counts")
+        elif what == "enrich":
+            ids = discover.undated_videos(conn, args.max_videos)
+            print(f"{len(ids)} undated video(s); about {-(-len(ids) // 50)} quota unit(s)")
+            print(f"  enriched {youtube_api.videos(conn, ids, key)}" if ids else "  nothing to do")
+        elif what == "channels":
+            ids = discover.stale_channels(conn, refresh_days=args.refresh_days, limit=args.max_channels)
+            print(f"{len(ids)} channel(s) need a subscriber count; about {-(-len(ids) // 50)} quota unit(s)")
+            print(f"  updated {youtube_api.channels(conn, ids, key)}" if ids else "  nothing to do")
+        elif what == "comments":
+            vids = comments.eligible(conn, min_views=args.min_views, refresh_days=args.refresh_days, limit=args.max_videos)
+            print(f"{len(vids)} long-form video(s) over {args.min_views:,} views; about {len(vids)} quota unit(s)")
+            r = youtube_api.thread_comments(conn, [v["video_id"] for v in vids], key, max_comments=args.max_comments)
+            print(f"  stored {sum(r['stored'].values())} comment(s) from {len(r['stored'])} video(s); {len(r['failed'])} failed")
+            for vid, err in r["failed"].items():
+                print(f"  {vid}: {err}", file=sys.stderr)
+            return 1 if r["failed"] else 0
+    except youtube_api.ApiError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_status(args) -> int:
@@ -220,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all", action="store_true", help="also re-run every topic searched before")
     p.add_argument("--max-results", type=int, default=20, help="results per keyword (default 20)")
     p.add_argument("--fast", action="store_true", help="skip the enrichment pass (no publish dates or subscriber counts)")
+    p.add_argument("--within", choices=sorted(discover.WITHIN_SP), help="only videos uploaded today / this week / month / year (YouTube's upload-date filter)")
     p.add_argument("--delay", type=float, default=3.0, help="seconds between keywords (default 3)")
     p.add_argument("--no-channels", action="store_true", help="don't refresh subscriber counts afterwards")
     p.add_argument("--refresh-days", type=float, default=7, help="subscriber counts newer than this are not refreshed (default 7)")
@@ -237,6 +286,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_enrich)
+
+    p = sub.add_parser("label", help="record a judgment about channels, e.g. faceless (kept as history; the latest wins)")
+    p.add_argument("label", choices=["faceless", "face", "unsure"])
+    p.add_argument("channels", nargs="+", help="channel ids (UC...)")
+    p.add_argument("--note", help="why, e.g. what you saw")
+    p.add_argument("--source", default="manual", choices=["manual", "thumbnail-review"])
+    p.set_defaults(fn=cmd_label)
+
+    p = sub.add_parser("api", help="use the official YouTube Data API instead of scraping (needs a key in $YOUTUBE_API_KEY)")
+    p.add_argument("what", choices=["search", "enrich", "channels", "comments"])
+    p.add_argument("targets", nargs="*", help="for search: the keywords")
+    p.add_argument("--key-env", default=youtube_api.DEFAULT_KEY_ENV, help="environment variable holding the key")
+    p.add_argument("--within", choices=sorted(discover.WITHIN_SP), help="search only videos uploaded in this window")
+    p.add_argument("--order", default="viewCount", choices=["viewCount", "relevance", "date", "rating"], help="search order (default viewCount)")
+    p.add_argument("--max-results", type=int, default=50)
+    p.add_argument("--max-videos", type=int, default=50)
+    p.add_argument("--max-channels", type=int, default=200)
+    p.add_argument("--max-comments", type=int, default=100)
+    p.add_argument("--min-views", type=int, default=comments.DEFAULT_MIN_VIEWS)
+    p.add_argument("--refresh-days", type=float, default=7)
+    p.set_defaults(fn=cmd_api)
 
     p = sub.add_parser("status", help="what's in the database")
     p.set_defaults(fn=cmd_status)

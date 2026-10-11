@@ -53,6 +53,8 @@ _ARGS = re.compile(r"max_comments=\d+,\d+,(\d+),\d+")
 def replies_requested(command: str | None) -> bool:
     """Was this comment fetch run with replies on? Read from the stored yt-dlp command. Anything else
     (an API response, a file) is unknown, and 'unanswered' is then not claimed."""
+    if command and command.startswith("youtube-api commentThreads.list") and "replies" in command:
+        return True            # the API returns up to 5 replies with each thread
     m = _ARGS.search(command or "")
     return bool(m and int(m.group(1)) > 0)
 

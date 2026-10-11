@@ -123,6 +123,53 @@ Things worth knowing:
 - Commenter names are not stored in the comment tables. The raw yt-dlp output is still kept verbatim (it includes handles), compressed once it exceeds 100 KB; `db.read_raw()` returns it unchanged. The database is local to you; keep that in mind before sharing it.
 - Comments need yt-dlp. The YouTube Data API's `commentThreads.list` output is also understood by `ingest` (without a stored command, replies count as not requested).
 
+## Pages
+
+The dashboard is one file with eight pages, each with its own navigation tab (`#today`, `#videos`, ...):
+
+| Page | For |
+|---|---|
+| **Today** | What is blowing up now: videos from the last 24 hours ranked by views ÷ subscribers, with a faceless filter |
+| **Overview** | One channel: size, typical views, findings, and the charts of what works for it |
+| **Channels** | Every channel side by side, breakouts, and small channels punching above their weight |
+| **Videos** | The video table (tier and date filters, all-channels switch), the views-by-date chart, momentum |
+| **Keywords** | Tracked topics with gap score, heat, long-tail phrases; check-a-keyword; autocomplete |
+| **Ideas** | Ranked ideas with evidence, and title patterns across channels |
+| **Comments** | Content requests, unanswered questions, most-liked comments |
+| **Data** | What is in the database and how complete it is: coverage, topics tracked, labels, recent pulls, how to refresh |
+
+The channel picker appears only on pages about one channel; the format toggle (All / Long-form / Shorts) is on every page except Data. Your channel and format choice is remembered in the browser.
+
+## Blowing up today
+
+`spinwheel search "topic" --within today` uses YouTube's own "uploaded today" filter (`--within week|month|year` also work). Everything such a search returns was published inside the window, so a video is known to be at most a day old **without asking for its publish date**, which is the request YouTube blocks most. That bound is stored with the search (`searches.within`) and drives the **Today** page and the 24-hour date filter. A video known only from the filter counts as "last 24 hours" if it was seen under it within a few hours (6) of your newest pull, because collecting subscriber counts takes time after the search; a video with an exact publish date gets no such grace.
+
+The filter covers regular videos, not Shorts.
+
+## Faceless channels
+
+Whether a channel shows a face cannot be read from the data, so it is a recorded judgment:
+
+```bash
+python -m spinwheel label faceless UCxxxx UCyyyy --source thumbnail-review --note "no people in 3 thumbnails"
+python -m spinwheel label face UCzzzz
+```
+
+Labels are history (the newest wins, older ones are kept). The **Today** page can show only verified faceless channels, only the not-yet-reviewed ones, or hide channels that show a face, and the **Data** page lists every label with its source and date. Unlabelled means not reviewed, not "has a face".
+
+## YouTube Data API (optional)
+
+Scraping needs no key but YouTube refuses many per-video requests from servers and busy IPs, and publish dates and comments are what go missing. The official API has no such check; it has a daily quota (10,000 units by default). With a key in `$YOUTUBE_API_KEY` (set it in your shell or environment settings; never paste it into a chat or commit it):
+
+```bash
+python -m spinwheel api search "ai documentary" "stoicism" --within today   # ~102 units per keyword; dates, stats and subscribers included
+python -m spinwheel api enrich                                              # publish dates, 1 unit per 50 videos
+python -m spinwheel api channels                                            # subscriber counts, 1 unit per 50 channels
+python -m spinwheel api comments                                            # top threads with replies, 1 unit per video
+```
+
+The key is sent with each request but never stored (stored commands say "key redacted"). Note: this client was written against the documented response shapes and tested with them, but has not been run against the live API.
+
 ## Tiers, filters and the all-channels list
 
 Every video gets a performance tier against its channel's subscribers (inclusive comparisons):
@@ -192,6 +239,7 @@ spinwheel/analysis.py    all the metrics and findings (tested)
 spinwheel/topics.py      phrases, topic stats, cross-channel gaps
 spinwheel/ideas.py       ranked ideas + copyable briefs
 spinwheel/suggest.py     YouTube autocomplete fetch, stored append-only
+spinwheel/youtube_api.py optional Data API client (search, videos, channels, comments)
 spinwheel/comments.py    picks videos over the view threshold, fetches comments via yt-dlp
 spinwheel/audience.py    classifies comments as requests / questions
 spinwheel/dashboard.html the page; analysis JSON is embedded at build time

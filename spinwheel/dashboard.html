@@ -128,6 +128,15 @@ button.link:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
 .heat-trending { border-color: var(--s2); border-width: 2px; }
 .heat-active { border-color: var(--s1); border-width: 2px; }
 .score { font-variant-numeric: tabular-nums; }
+.nav { display: flex; gap: 2px; overflow-x: auto; margin: 14px 0 0; border-bottom: 1px solid var(--grid); }
+.nav a { padding: 9px 14px; color: var(--ink-2); text-decoration: none; border-bottom: 2px solid transparent; font-weight: 600; white-space: nowrap; margin-bottom: -1px; }
+.nav a:hover { color: var(--ink); background: var(--wash); }
+.nav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--s1); }
+.pagehead h2 { margin-top: 20px; font-size: 18px; }
+.flabel { font-size: 11px; border-radius: 4px; padding: 0 6px; white-space: nowrap; border: 1px solid var(--axis); margin-left: 6px; vertical-align: 1px; }
+.flabel-faceless { border-color: var(--s1); border-width: 2px; font-weight: 650; }
+.flabel-face { color: var(--muted); }
+pre.cmd { background: var(--wash); border-radius: 8px; padding: 10px 12px; overflow-x: auto; font-size: 12px; margin: 6px 0; }
 .pill { font-size: 11px; color: var(--ink-2); border: 1px solid var(--axis); border-radius: 999px; padding: 0 6px; margin-left: 6px; white-space: nowrap; }
 .two { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 820px) { .two { grid-template-columns: minmax(0, 1fr); } }
@@ -160,6 +169,8 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
     </div>
     <button id="theme" type="button" aria-label="Toggle light and dark theme">Theme</button>
   </header>
+  <nav class="nav" id="nav" aria-label="Pages"></nav>
+  <div id="bar"></div>
   <div id="content"></div>
   <footer id="foot"></footer>
 </main>
@@ -438,73 +449,176 @@ function scatter(c, vids, median) {
 }
 
 // ---------------------------------------------------------------- state & render
-let channelId = null, mode = 'all';
+let channelId = null, mode = 'all', page = 'today';
 const HAS = () => !!DATA && DATA.variants.all.channels.length > 0;
 const SLICE = () => DATA.variants[mode];
 const CH = () => SLICE().channels, DET = () => SLICE().detail, BRK = () => SLICE().breakouts;
 const NOUN = { all: 'videos', long: 'long-form videos', short: 'Shorts' };
-const setHash = () => history.replaceState(null, '', '#channel=' + encodeURIComponent(channelId) + '&format=' + mode);
+const PAGES = [['today', 'Today'], ['overview', 'Overview'], ['channels', 'Channels'], ['videos', 'Videos'], ['keywords', 'Keywords'], ['ideas', 'Ideas'], ['comments', 'Comments'], ['data', 'Data']];
+const NEEDS_CHANNEL = new Set(['overview', 'videos', 'keywords', 'ideas', 'comments']);
+const store = { get(k) { try { return localStorage.getItem('spinwheel-' + k); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem('spinwheel-' + k, v); } catch (e) { /* storage blocked */ } } };
+const setHash = () => {
+  store.set('channel', channelId); store.set('format', mode);
+  try { history.replaceState(null, '', '#' + page + '&channel=' + encodeURIComponent(channelId) + '&format=' + mode); } catch (e) { /* sandboxed viewer */ }
+};
 const sortState = { key: 'published', dir: -1 };
 let showAll = false, query = '', tierFilter = 'any', dateFilter = 'any', scope = 'channel';
 
 function pickChannel() {
-  const m = /channel=([^&]+)/.exec(location.hash), f = /format=(all|long|short)/.exec(location.hash);
-  const want = m && decodeURIComponent(m[1]), all = DATA.variants.all.channels;
+  const hash = location.hash, m = /channel=([^&]+)/.exec(hash), f = /format=(all|long|short)/.exec(hash), pg = /^#([a-z]+)/.exec(hash);
+  const want = (m && decodeURIComponent(m[1])) || store.get('channel'), all = DATA.variants.all.channels;
   channelId = all.some((c) => c.id === want) ? want : all[0].id;
-  mode = f ? f[1] : 'all';
+  const fm = f ? f[1] : store.get('format');
+  mode = ['all', 'long', 'short'].includes(fm) ? fm : 'all';
+  if (pg && PAGES.some((x) => x[0] === pg[1])) page = pg[1];
 }
 const setFresh = () => { $('fresh').textContent = `Data through ${DATA.data_through ? DATA.data_through.slice(0, 10) : '—'} · ${DATA.pulls} pulls · ${DATA.video_snapshots} video snapshots kept`; };
 let VID = {};
 function rebuildVid() { VID = {}; for (const [cid, a] of Object.entries(DET())) for (const v of a.videos) VID[cid + '|' + v.id] = v; }
+function go(p) { page = p; showAll = false; setHash(); render(); scrollTo(0, 0); }
+const labelOf = (cid) => (CH().find((c) => c.id === cid) || {}).label || null;
+function labelChip(cid) {
+  const l = labelOf(cid);
+  if (!l) return null;
+  const text = { faceless: 'FACELESS', face: 'shows face', unsure: 'unsure' }[l.label];
+  return h('span', { class: 'flabel flabel-' + l.label, title: `${l.label} (${l.source === 'thumbnail-review' ? 'judged from thumbnails' : 'set by you'}, ${l.at})${l.note ? ': ' + l.note : ''}` }, text);
+}
 function setMode(m) { mode = m; setHash(); showAll = false; render(); }
 
 function formatToggle() {
   const group = h('div', { class: 'seg', role: 'group', 'aria-label': 'Video format' });
   DATA.formats.forEach((f) => {
-    const a = DATA.variants[f.id].detail[channelId], n = a ? a.videos.length : 0;
+    const a = DATA.variants[f.id].detail[channelId];
+    const n = NEEDS_CHANNEL.has(page) ? (a ? a.videos.length : 0) : DATA.variants[f.id].channels.reduce((t, c) => t + c.n_videos, 0);
     const b = h('button', { type: 'button', 'aria-pressed': String(f.id === mode), title: f.id === 'short' ? 'Vertical video up to 3 minutes' : null }, f.label, h('span', { class: 'count' }, String(n)));
     b.addEventListener('click', () => { if (f.id !== mode) setMode(f.id); });
     group.append(b);
   });
   return group;
 }
-function formatNotes() {
+function formatDetails() {
   const b = DATA.format_basis, total = Object.values(b).reduce((x, y) => x + y, 0), approx = (b.duration || 0) + (b.none || 0);
-  const out = [];
-  if (mode !== 'all') out.push(h('p', { class: 'banner' }, `Showing ${NOUN[mode]} only. Every number, chart, idea and comparison below uses ${NOUN[mode]} only, measured against other ${NOUN[mode]}.`));
-  out.push(h('details', { class: 'how', style: 'margin-top:8px' }, h('summary', {}, 'How Shorts are detected'), h('ul', {},
+  return [h('ul', { style: 'margin:6px 0 0;padding-left:18px;color:var(--ink-2);font-size:13px' },
     h('li', {}, `A /shorts/ URL means Short (${b.url || 0} videos).`),
     h('li', {}, `Width and height known: vertical and 3 minutes or less means Short, anything else is long-form (${b.shape || 0}).`),
     h('li', {}, `Neither in the pull: ${DATA.short_max} seconds or less means Short, which is only an approximation (${b.duration || 0}).`),
-    h('li', {}, `Nothing known: long-form (${b.none || 0}).`),
-    h('li', {}, 'Pull with full (non-flat) yt-dlp output for exact detection. The YouTube Data API gives neither URL nor shape.'))));
-  if (approx && total) out.push(h('p', { class: 'note', style: 'margin:4px 0 0' }, `${approx} of ${total} videos were classified by length alone, so the Shorts and long-form split is approximate for them.`));
-  return out;
+    h('li', {}, `Nothing known: long-form (${b.none || 0}).`)),
+    approx && total ? h('p', { class: 'note', style: 'margin:6px 0 0' }, `${approx} of ${total} videos were classified by length alone, so the Shorts and long-form split is approximate for them.`) : null];
+}
+
+// ------------------------------------------------------------- pages
+const pageHead = (title, sub) => h('div', { class: 'pagehead' }, h('h2', {}, title), h('p', { class: 'sub' }, sub));
+
+function renderNav() {
+  const nav = $('nav'); nav.textContent = '';
+  PAGES.forEach(([id, label]) => {
+    const a = h('a', { href: '#' + id, 'aria-current': id === page ? 'page' : null }, label);
+    a.addEventListener('click', (e) => { e.preventDefault(); go(id); });
+    nav.append(a);
+  });
+}
+
+function scopeBar() {
+  const bar = $('bar'); bar.textContent = '';
+  if (page === 'data') return;
+  const parts = [];
+  if (NEEDS_CHANNEL.has(page)) {
+    const sel = h('select', { id: 'chsel', 'aria-label': 'Channel' }, CH().map((c) => h('option', { value: c.id }, `${c.title} (${c.n_videos} ${NOUN[mode]})`)));
+    sel.value = channelId;
+    sel.addEventListener('change', () => { channelId = sel.value; setHash(); showAll = false; render(); });
+    parts.push(h('label', { for: 'chsel' }, 'Channel'), sel, h('span', { class: 'spacer' }));
+  }
+  parts.push(h('span', { id: 'fmt-l' }, 'Format'), formatToggle());
+  bar.append(h('div', { class: 'filters' }, parts));
+  if (mode !== 'all') bar.append(h('p', { class: 'banner' }, `Showing ${NOUN[mode]} only. Every number, chart, idea and comparison on this page uses ${NOUN[mode]} only, measured against other ${NOUN[mode]}.`));
 }
 
 function render() {
   redraws.length = 0;
   const root = $('content'); root.textContent = '';
+  renderNav();
   if (!HAS()) {
-    root.append(h('p', { class: 'empty' }, 'No data yet. Run: python -m spinwheel pull -- yt-dlp -J "https://www.youtube.com/@channel/videos", then rebuild this dashboard.'));
+    $('bar').textContent = '';
+    root.append(h('p', { class: 'empty' }, 'No data yet. Run: python -m spinwheel search "your topic" --within today, then rebuild this dashboard.'));
     return;
   }
-  rebuildVid();
+  rebuildVid(); setFresh(); scopeBar();
   const ch = CH().find((c) => c.id === channelId), d = DET()[channelId];
-
-  const sel = h('select', { id: 'chsel', 'aria-label': 'Channel' }, CH().map((c) => h('option', { value: c.id }, `${c.title} (${c.n_videos} ${NOUN[mode]})`)));
-  sel.value = channelId;
-  sel.addEventListener('change', () => { channelId = sel.value; setHash(); showAll = false; render(); });
-  root.append(h('div', { class: 'filters' }, h('label', { for: 'chsel' }, 'Channel'), sel, h('span', { class: 'spacer' }), h('span', { id: 'fmt-l' }, 'Format'), formatToggle()));
-  root.append(...formatNotes());
-  setFresh();
-  if (!d.videos.length) {
+  if (NEEDS_CHANNEL.has(page) && !d.videos.length) {
     root.append(h('p', { class: 'empty' }, `No ${NOUN[mode]} from this channel in the data you've pulled. Pick another channel, or switch the format.`));
-    channelsSection(root);
     return;
   }
+  PAGE_FN[page](root, ch, d);
+  requestAnimationFrame(() => redraws.forEach((f) => f()));
+}
 
-  // tiles
+// Today ----------------------------------------------------------------
+let todayWindow = '1', todayTier = 'hot', todayFace = null, todayMin = '1000';
+const MIN_VIEW_OPTIONS = [['0', 'Any number of views'], ['100', '100+ views'], ['1000', '1,000+ views'], ['5000', '5,000+ views'], ['10000', '10,000+ views']];
+const FACE_OPTIONS = [['all', 'All channels'], ['faceless', 'Verified faceless only'], ['unreviewed', 'Not reviewed yet'], ['noface', 'Hide channels that show a face']];
+const TODAY_WINDOWS = [['1', 'Last 24 hours', 1], ['3', 'Last 3 days', 3], ['7', 'Last 7 days', 7]];
+
+function pageToday(root) {
+  if (todayFace === null) todayFace = CH().some((c) => c.label && c.label.label === 'faceless') ? 'faceless' : 'all';   // open on the faceless view once channels have been reviewed
+  root.append(pageHead('Blowing up today', `Videos uploaded in the last 24 hours (a real publish date, or YouTube's “uploaded today” filter), ranked by how much of the channel's subscriber count they have already reached. A video with views above 100% of subscribers is FIRE.`));
+  const card_ = h('div', { class: 'card' }), body = h('tbody'), summary = h('p', { style: 'margin:0 0 8px' }), more = h('button', { type: 'button' }, '');
+  const sel = (label, opts, value, set) => { const el = h('select', { 'aria-label': label, style: 'min-width:0' }, opts.map(([v, t]) => h('option', { value: v }, t))); el.value = value; el.addEventListener('change', () => { set(el.value); fill(); }); return el; };
+  const winSel = sel('Time window', TODAY_WINDOWS, todayWindow, (v) => { todayWindow = v; });
+  const tierSel = sel('Tier', TIER_OPTIONS, todayTier, (v) => { todayTier = v; });
+  const faceSel = sel('Faceless', FACE_OPTIONS, todayFace, (v) => { todayFace = v; });
+  const minSel = sel('Minimum views', MIN_VIEW_OPTIONS, todayMin, (v) => { todayMin = v; });
+  const sort = { key: 'views_per_sub', dir: -1 };
+  const cols = [
+    ['title', 'Video', (v) => v.title, false, (v) => { const img = safeImg(v.thumb), im = img ? h('img', { src: img, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' }) : null; if (im) im.addEventListener('error', () => im.remove());
+      return h('td', {}, h('div', { class: 'vid' }, im, h('span', {}, v.title))); }],
+    ['channel', 'Channel', (v) => chanTitle(v.channel_id), false, (v) => h('td', {}, chanTitle(v.channel_id), labelChip(v.channel_id))],
+    ['subs', 'Subscribers', (v) => v.subs, true, (v) => h('td', { class: 'n' }, fmt(v.subs))],
+    ['views', 'Views', (v) => v.views, true, (v) => h('td', { class: 'n' }, fmt(v.views))],
+    ['views_per_sub', 'Views ÷ subs', (v) => v.views_per_sub, true, (v) => h('td', { class: 'n' }, times(v.views_per_sub))],
+    ['tier', 'Tier', tierRank, true, (v) => h('td', { class: 'n' }, tierChip(v))],
+    ['duration_s', 'Length', (v) => v.duration_s, true, (v) => h('td', { class: 'n' }, dur(v.duration_s))],
+    ['found', 'Found under', (v) => (v.found_under || []).join(', '), false, (v) => h('td', { class: 'note' }, (v.found_under || []).join(', '))],
+  ];
+  const head = h('tr');
+  cols.forEach(([key, name, , num]) => {
+    const b = h('button', { type: 'button' }, name), th = h('th', { class: num ? 'n' : '', scope: 'col' }, b);
+    b.addEventListener('click', () => { sort.dir = sort.key === key ? -sort.dir : -1; sort.key = key; fill(); }); head.append(th);
+  });
+  const pool = () => Object.values(DET()).flatMap((a) => a.videos);
+  function fill() {
+    const days = TODAY_WINDOWS.find((w) => w[0] === todayWindow)[2], minTier = todayTier === 'any' ? 0 : TIER_RANK[todayTier];
+    const fresh = pool().filter((v) => ageOk(v, days));
+    const faceOk = (v) => { const l = labelOf(v.channel_id); const lab = l ? l.label : null;
+      return todayFace === 'all' || (todayFace === 'faceless' && lab === 'faceless') || (todayFace === 'unreviewed' && !lab) || (todayFace === 'noface' && lab !== 'face'); };
+    const minViews = Number(todayMin);
+    const rows = fresh.filter((v) => tierRank(v) >= minTier && faceOk(v) && (v.views || 0) >= minViews);
+    const get = cols.find((c) => c[0] === sort.key)[2];
+    rows.sort((a, b) => { const x = get(a), y = get(b); if (x == null && y == null) return 0; if (x == null) return 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * sort.dir; });
+    const chans = new Set(rows.map((v) => v.channel_id)), cnt = { faceless: 0, face: 0, unsure: 0, none: 0 };
+    chans.forEach((c) => { const l = labelOf(c); cnt[l ? l.label : 'none']++; });
+    const shown = showAll ? rows : rows.slice(0, 40);
+    summary.textContent = `${rows.length} video${rows.length === 1 ? '' : 's'} from ${chans.size} channel${chans.size === 1 ? '' : 's'} (of ${fresh.length} uploaded in the window). Channels: ${cnt.faceless} verified faceless, ${cnt.face} show a face, ${cnt.unsure} unsure, ${cnt.none} not reviewed.`;
+    body.textContent = '';
+    shown.forEach((v) => body.append(h('tr', { class: 'row', tabindex: '0', onclick: () => openVideo(v), onkeydown: (e) => e.key === 'Enter' && openVideo(v) }, cols.map((c) => c[4](v)))));
+    head.querySelectorAll('th').forEach((th, i) => th.setAttribute('aria-sort', cols[i][0] === sort.key ? (sort.dir > 0 ? 'ascending' : 'descending') : 'none'));
+    if (!rows.length) body.append(h('tr', {}, h('td', { colspan: cols.length, class: 'empty' }, fresh.length ? 'No video matches these filters. Try “Any tier”.' : `Nothing uploaded in this window is in the data yet. Run: python -m spinwheel search "your topic" --within today`)));
+    more.hidden = rows.length <= 40; more.textContent = showAll ? 'Show fewer' : `Show all ${rows.length}`;
+  }
+  more.addEventListener('click', () => { showAll = !showAll; fill(); });
+  card_.append(h('div', { class: 'filters', style: 'margin-top:0' }, winSel, tierSel, minSel, faceSel), summary,
+    h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, head), body)), h('div', { style: 'margin-top:8px' }, more),
+    h('details', { class: 'how', style: 'margin-top:12px' }, h('summary', {}, 'How to read this'), h('ul', {},
+      h('li', {}, 'Views are what the video earned so far, in under a day, so any tier here is fast. FIRE means views already exceed the channel\'s subscribers. A tiny channel can hit FIRE with a handful of views (10 views on 2 subscribers is 5×), which is why the minimum-views filter starts at 1,000.'),
+      h('li', {}, 'FACELESS is a judgment, not a measurement: it comes from looking at thumbnails (judged from thumbnails) or from you (python -m spinwheel label faceless UC…). Channels with no label are simply not reviewed yet.'),
+      h('li', {}, 'This covers regular videos. YouTube\'s “uploaded today” filter leaves out Shorts. A video known only from that filter counts as “last 24 hours” if it was seen under it within a few hours of your newest pull.'),
+      h('li', {}, 'Subscriber counts are the channel\'s current count, so a channel that just grew makes its older videos look smaller.'))));
+  root.append(card_);
+  fill();
+}
+
+// Overview ---------------------------------------------------------------
+function pageOverview(root, ch, d) {
+  root.append(pageHead('Channel overview', 'How the selected channel is doing: size, typical views, what its history says, and what works for it.'));
   const delta = ch.subs_delta;
   root.append(h('div', { class: 'tiles' },
     tile('Subscribers', fmt(ch.subscribers), delta ? `${delta.change >= 0 ? '+' : ''}${fmt(delta.change)} in ${Math.round(delta.days)} days` : 'one snapshot so far', delta && delta.change > 0),
@@ -514,7 +628,7 @@ function render() {
     tile('Uploads, last 90 days', String(ch.uploads_90d), 'from the videos pulled so far'),
     tile('Videos tracked', String(ch.n_videos), `${DATA.pulls} pulls stored`)));
 
-  // findings
+
   root.append(h('h2', {}, 'What the data says'));
   const chipNames = { outlier: 'Outlier', length: 'Length', weekday: 'Publish day', title: 'Title', keyword: 'Topic', momentum: 'Momentum', channel: 'Channel', caution: 'Heads up' };
   root.append(d.findings.length
@@ -522,25 +636,9 @@ function render() {
     : h('p', { class: 'note' }, 'No pattern is strong enough to call yet. Pull more videos or wait for older ones to mature.'));
   root.append(h('p', { class: 'note' }, 'These are correlations in your own history, not proof of cause. Treat each as something to test in the next upload.'));
 
-  // content ideas
-  root.append(h('h2', {}, 'Content ideas'));
-  root.append(ideasSection(d));
-  root.append(h('h2', {}, 'Patterns across tracked channels'));
-  root.append(patternsSection());
 
-  channelsSection(root);
-
-  // charts
   root.append(h('h2', {}, 'What works'));
   const grid = h('div', { class: 'grid' }); root.append(grid);
-
-  const sc = card('Every video: views by publish date', 'Click a dot for its history. Log scale, so a 10× outlier stays visible next to a typical video.', { wide: true });
-  sc.draw = () => scatter(sc, d.videos, d.median_views);
-  sc.table = { cols: ['Video', 'Published', 'Views', 'vs median'], rows: d.videos.map((v) => [v.title, (v.published || '').slice(0, 10), fmt(v.views), times(v.score)]) };
-  sc.legend.append(h('span', {}, h('i', { style: 'background:var(--s1)' }), 'Typical'), h('span', {}, h('i', { style: 'background:var(--s2)' }), `Video outlier (${DATA.outlier_x}× its channel median or more)`),
-    h('span', {}, h('i', { class: 'ring' }), `Under ${DATA.mature_days} days old`), h('span', {}, h('i', { class: 'line', style: 'background:var(--ink-2)' }), 'Channel median'));
-  grid.append(sc.root);
-
   const gr = card('Subscribers over time', 'One point per pull.');
   const pts = d.growth.filter((g) => g[1] != null).map((g) => ({ t: ts(g[0]), v: g[1] }));
   gr.draw = () => lineChart(gr, pts, { label: 'subscribers' });
@@ -568,17 +666,31 @@ function render() {
   ti.legend.append(h('span', {}, h('i', { style: 'background:var(--s1)' }), 'Does better with the pattern'), h('span', {}, h('i', { style: 'background:var(--s2)' }), 'Does worse with it'));
   grid.append(ti.root);
 
-  // tables: videos
-  root.append(h('h2', { id: 'videos-h' }, 'Videos'));
+
+}
+
+// Channels --------------------------------------------------------------
+function pageChannels(root) {
+  root.append(pageHead('Channels', 'Every tracked channel side by side, the videos that did far better than their audience size would predict, and the small channels that are punching above their weight.'));
+  channelsSection(root);
+  root.append(patternsSection([2]));
+}
+
+// Videos ----------------------------------------------------------------
+function pageVideos(root, ch, d) {
+  root.append(pageHead('Videos', 'Every tracked video with its tier. Filter by tier and date, or switch to all channels for a cross-channel list.'));
+  const grid = h('div', { class: 'grid' }); root.append(grid);
+
+  const sc = card('Every video: views by publish date', 'Click a dot for its history. Log scale, so a 10× outlier stays visible next to a typical video.', { wide: true });
+  sc.draw = () => scatter(sc, d.videos, d.median_views);
+  sc.table = { cols: ['Video', 'Published', 'Views', 'vs median'], rows: d.videos.map((v) => [v.title, (v.published || '').slice(0, 10), fmt(v.views), times(v.score)]) };
+  sc.legend.append(h('span', {}, h('i', { style: 'background:var(--s1)' }), 'Typical'), h('span', {}, h('i', { style: 'background:var(--s2)' }), `Video outlier (${DATA.outlier_x}× its channel median or more)`),
+    h('span', {}, h('i', { class: 'ring' }), `Under ${DATA.mature_days} days old`), h('span', {}, h('i', { class: 'line', style: 'background:var(--ink-2)' }), 'Channel median'));
+  grid.append(sc.root);
+
+
+  root.append(h('div', { style: 'height:12px' }));
   root.append(videoTable(d));
-
-  root.append(h('h2', {}, 'Keyword research'));
-  root.append(trackedSection());
-  root.append(keywordSection(d));
-
-  root.append(h('h2', {}, 'Audience asks'));
-  root.append(audienceSection(d));
-
   root.append(h('h2', {}, 'Momentum and title tests'));
   const two = h('div', { class: 'two' }); root.append(two);
   const byId = Object.fromEntries(d.videos.map((v) => [v.id, v]));
@@ -590,12 +702,71 @@ function render() {
     d.title_changes.length ? h('ul', { class: 'changes' }, d.title_changes.map((c) => h('li', {}, h('s', {}, c.from), ' → ', h('b', {}, c.to), h('span', { class: 'note' }, `  ${c.at.slice(0, 10)}, ${fmt(c.views)} views`))))
       : h('p', { class: 'empty' }, 'No title changes seen between pulls.')));
 
-  requestAnimationFrame(() => redraws.forEach((f) => f()));
+
 }
+
+// Keywords / Ideas / Comments -----------------------------------------------
+function pageKeywords(root, ch, d) {
+  root.append(pageHead('Keyword research', 'Tracked topics and their long-tail phrases, what this channel already covers, and what people search for.'));
+  root.append(trackedSection());
+  root.append(keywordSection(d));
+}
+function pageIdeas(root, ch, d) {
+  root.append(pageHead('Content ideas', 'Ranked ideas for the selected channel, each with its evidence, plus how high-performing titles are built across all tracked channels.'));
+  root.append(ideasSection(d));
+  root.append(h('h2', {}, 'Patterns across tracked channels'));
+  root.append(patternsSection([0, 1]));
+}
+function pageComments(root, ch, d) {
+  root.append(pageHead('Audience comments', 'What viewers of the selected channel ask for, what they ask and never got answered, and what they liked most.'));
+  root.append(audienceSection(d));
+}
+
+// Data --------------------------------------------------------------------
+function pageData(root) {
+  const o = DATA.overview, pc = (a, b) => (b ? Math.round((a / b) * 100) + '%' : '—');
+  root.append(pageHead('Data', 'What is in the database, how complete it is, and how to refresh it. Nothing here is analysis; it is the raw material.'));
+  const row = (label, value, note) => h('tr', {}, h('td', {}, label), h('td', { class: 'n' }, value), h('td', { class: 'note' }, note || ''));
+  root.append(h('section', { class: 'card' }, h('h3', {}, 'Coverage'), h('p', { class: 'sub' }, `${DATA.pulls} pulls stored, ${DATA.video_snapshots} video snapshots, first pull ${DATA.first_pull ? DATA.first_pull.slice(0, 10) : '—'}, newest ${DATA.data_through ? DATA.data_through.slice(0, 10) : '—'}.`),
+    h('div', { class: 'scroll' }, h('table', {}, h('tbody', {},
+      row('Videos tracked', o.videos),
+      row('…with a publish date', `${o.dated} (${pc(o.dated, o.videos)})`, 'Needed for age-based analysis and ideas.'),
+      row('…no date, but bounded by an upload-date search', `${o.bounded} (${pc(o.bounded, o.videos)})`, 'Known to be at most a day / week old; enough for the Today page.'),
+      row('…no date at all', `${o.undated} (${pc(o.undated, o.videos)})`, 'Run: python -m spinwheel enrich'),
+      row('Channels tracked', o.channels),
+      row('…with a subscriber count', `${o.with_subs} (${pc(o.with_subs, o.channels)})`, 'Needed for tiers. Run: python -m spinwheel channels'),
+      row('…labelled faceless / shows face / unsure', `${o.labelled.faceless} / ${o.labelled.face} / ${o.labelled.unsure}`, 'Channels without a label are not reviewed yet.'),
+      row('Videos with comments fetched', `${o.comment_videos} (${o.comments} comments)`, 'Long-form videos over 10,000 views. Run: python -m spinwheel comments'))))));
+
+  root.append(h('section', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'Topics tracked'), h('p', { class: 'sub' }, 'Each is a keyword searched on YouTube. “Filter” shows the upload-date filters used.'),
+    o.topics.length ? h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Topic'), h('th', { class: 'n' }, 'Videos'), h('th', { class: 'n' }, 'Runs'), h('th', {}, 'Last run'), h('th', {}, 'Filter'))),
+      h('tbody', {}, o.topics.map((t) => h('tr', {}, h('td', {}, t.topic), h('td', { class: 'n' }, t.videos), h('td', { class: 'n' }, t.runs), h('td', {}, t.last.slice(0, 16).replace('T', ' ')), h('td', {}, t.within.length ? t.within.join(', ') : 'any time'))))))
+      : h('p', { class: 'empty' }, 'No topic searched yet. Run: python -m spinwheel search "your topic" --within today')));
+
+  root.append(h('section', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'Channel labels'), h('p', { class: 'sub' }, 'Judgments recorded about channels; the newest wins and older ones are kept.'),
+    o.labels.length ? h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Channel'), h('th', {}, 'Label'), h('th', {}, 'Source'), h('th', {}, 'Date'), h('th', {}, 'Note'))),
+      h('tbody', {}, o.labels.map((l) => h('tr', {}, h('td', {}, l.title), h('td', {}, l.label), h('td', {}, l.source === 'thumbnail-review' ? 'judged from thumbnails' : 'set by you'), h('td', {}, l.at), h('td', { class: 'note' }, l.note || ''))))))
+      : h('p', { class: 'empty' }, 'None yet. Run: python -m spinwheel label faceless UC…')));
+
+  root.append(h('section', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'How Shorts are detected'), ...formatDetails().filter(Boolean)));
+
+  root.append(h('section', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'Recent pulls'),
+    h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'When (UTC)'), h('th', {}, 'Source'), h('th', {}, 'Command'))),
+      h('tbody', {}, o.pulls.map((x) => h('tr', {}, h('td', {}, x.at.slice(0, 16).replace('T', ' ')), h('td', {}, x.source), h('td', { class: 'note', style: 'overflow-wrap:anywhere' }, x.command || '—'))))))));
+
+  root.append(h('section', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'Refresh your data'), h('p', { class: 'sub' }, 'Run these on your own computer, then rebuild this page.'),
+    h('pre', { class: 'cmd' }, ['python -m spinwheel search "your topic" --within today --max-results 20',
+      'python -m spinwheel channels                       # subscriber counts',
+      'python -m spinwheel enrich                         # publish dates that were refused',
+      'python -m spinwheel comments                       # comments on long-form videos over 10K views',
+      'python -m spinwheel label faceless UC… --note "no people on screen"',
+      'python -m spinwheel dashboard -o dashboard.html'].join('\n'))));
+}
+
+const PAGE_FN = { today: pageToday, overview: pageOverview, channels: pageChannels, videos: pageVideos, keywords: pageKeywords, ideas: pageIdeas, comments: pageComments, data: pageData };
 function channelsSection(root) {
   // channel comparison
   if (CH().length > 1) {
-    root.append(h('h2', {}, 'Channels'));
     root.append(h('div', { class: 'card scroll' }, h('table', {},
       h('thead', {}, h('tr', {}, ['Channel', 'Subscribers', 'Growth', 'Videos', 'Median views', 'Views ÷ subs', 'Fire / Outlier / Hot', 'Engagement', 'Uploads (90d)', 'Flag'].map((x, i) => h('th', { class: i ? 'n' : '' }, x)))),
       h('tbody', {}, CH().map((c) => h('tr', { class: 'row', tabindex: '0', 'aria-current': c.id === channelId ? 'true' : null, onclick: () => pick(c.id), onkeydown: (e) => e.key === 'Enter' && pick(c.id) },
@@ -611,7 +782,7 @@ function channelsSection(root) {
   }
 
 }
-const pick = (id) => { channelId = id; setHash(); showAll = false; render(); scrollTo(0, 0); };
+const pick = (id) => { channelId = id; go('overview'); };
 function tile(label, value, deltaText, up, flag) {
   return h('div', { class: 'tile' }, h('div', { class: 'label' }, label), h('div', { class: 'value' }, value),
     h('div', { class: 'delta' + (up ? ' up' : '') }, (up ? '▲ ' : '') + deltaText), flag ? h('div', { style: 'margin-top:6px' }, flag) : null);
@@ -627,11 +798,12 @@ const TIER_RANK = { fire: 3, outlier: 2, hot: 1 };
 const tierRank = (v) => TIER_RANK[v.tier] || 0;
 const tierChip = (v) => (v.tier ? h('span', { class: 'tier tier-' + v.tier, title: v.tier_why }, v.tier.toUpperCase()) : null);
 const DAY = 86400000;
-function publishedWithin(v, days) {                 // relative to the newest pull, not today's date
-  if (days == null || !DATA.data_through || !v.published) return days == null;
-  const dateOnly = v.published.length === 10;       // a date with no time of day: count the whole day
-  return Date.parse(DATA.data_through) - ts(v.published) <= days * DAY + (dateOnly ? DAY : 0);
-}
+// v.age_max_days is measured from the newest pull and counts the whole day of a bare date. A video bounded only by an
+// upload-date filter ("uploaded today") was at most a day old when it was seen, which can be hours before the newest
+// pull, so it gets a few hours of grace; an exact publish date gets none.
+const FILTER_GRACE_DAYS = 0.25;
+const ageOk = (v, days) => v.age_max_days != null && v.age_max_days <= days + (v.window ? FILTER_GRACE_DAYS : 0);
+function publishedWithin(v, days) { return days == null || ageOk(v, days); }
 const DATE_OPTIONS = [['any', 'Published: any time', null], ['1', 'Last 24 hours', 1], ['7', 'Last 7 days', 7], ['30', 'Last 30 days', 30], ['90', 'Last 90 days', 90]];
 const TIER_OPTIONS = [['any', 'Any tier'], ['fire', 'FIRE only'], ['outlier', 'OUTLIER or better'], ['hot', 'HOT or better']];
 
@@ -643,7 +815,7 @@ function videoCols() {
   };
   const n = (get, render) => (v) => h('td', { class: 'n' }, render ? render(v) : get(v));
   const c = [['title', 'Video', (v) => v.title, false, titleCell]];
-  if (scope === 'all') c.push(['channel', 'Channel', (v) => chanTitle(v.channel_id), false, (v) => h('td', {}, chanTitle(v.channel_id))],
+  if (scope === 'all') c.push(['channel', 'Channel', (v) => chanTitle(v.channel_id), false, (v) => h('td', {}, chanTitle(v.channel_id), labelChip(v.channel_id))],
     ['subs', 'Subscribers', (v) => v.subs, true, n(null, (v) => fmt(v.subs))]);
   if (mode === 'all') c.push(['format', 'Type', (v) => v.format, false, (v) => h('td', {}, v.format === 'short' ? 'Short' : 'Long')]);
   c.push(
@@ -721,7 +893,7 @@ function videoTable(d) {
 }
 
 // patterns across channels ------------------------------------------
-function patternsSection() {
+function patternsAll() {
   const P = SLICE().patterns, wrap = h('div'), vv = ([cid, id]) => VID[cid + '|' + id];
   const link = (ref) => { const v = vv(ref); return v ? h('div', {}, h('button', { type: 'button', class: 'link', onclick: () => openVideo(v) }, trunc(v.title, 54))) : null; };
   const pctOf = (x) => (x == null ? '—' : Math.round(x * 100) + '%');
@@ -753,6 +925,12 @@ function patternsSection() {
   }
   wrap.append(small);
   return wrap;
+}
+
+function patternsSection(keep) {
+  const w = patternsAll();
+  [...w.children].forEach((el, i) => { if (!keep.includes(i)) el.remove(); });
+  return w;
 }
 
 // tracked topics ---------------------------------------------------
