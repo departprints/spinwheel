@@ -36,6 +36,18 @@ class VideoRec:
 
 
 @dataclass
+class CommentRec:
+    video_id: str
+    comment_id: str
+    text: str
+    parent_id: str | None = None
+    like_count: int | None = None
+    published_at: str | None = None
+    by_creator: bool = False
+    pinned: bool = False
+
+
+@dataclass
 class ChannelRec:
     channel_id: str
     title: str | None = None
@@ -50,6 +62,7 @@ class Parsed:
     videos: list[VideoRec]
     channels: list[ChannelRec]
     skipped: int
+    comments: list[CommentRec] = field(default_factory=list)
 
 
 def _int(x: Any) -> int | None:
@@ -120,6 +133,15 @@ def _ytdlp(o: dict, parent: dict | None, out: "_Acc") -> None:
         out.skipped += 1
         return
     cid = o.get("channel_id") or (parent or {}).get("channel_id")
+    comments = o.get("comments")
+    if isinstance(comments, list):
+        for c in comments:
+            if isinstance(c, dict) and isinstance(c.get("id"), str) and isinstance(c.get("text"), str):
+                out.comment(CommentRec(
+                    video_id=vid, comment_id=c["id"], text=c["text"],
+                    parent_id=None if c.get("parent") in (None, "root") else str(c["parent"]),
+                    like_count=_int(c.get("like_count")), published_at=_iso_from_epoch(c.get("timestamp")),
+                    by_creator=bool(c.get("author_is_uploader")), pinned=bool(c.get("is_pinned"))))
     out.video(VideoRec(
         video_id=vid,
         channel_id=cid,
@@ -130,7 +152,9 @@ def _ytdlp(o: dict, parent: dict | None, out: "_Acc") -> None:
         duration_s=_int(o.get("duration")),
         view_count=_int(o.get("view_count")),
         like_count=_int(o.get("like_count")),
-        comment_count=_int(o.get("comment_count")),
+        # With --write-comments yt-dlp overwrites comment_count with the number it fetched, not the
+        # video's real total, so a count that came with comments is unknown, not 12.
+        comment_count=None if isinstance(comments, list) else _int(o.get("comment_count")),
         thumbnail_url=o.get("thumbnail"),
         width=_int(o.get("width")), height=_int(o.get("height")),
         page_url=_page_url(o),
@@ -151,11 +175,37 @@ def _best_thumb(thumbs: Any) -> str | None:
     return None
 
 
+def _api_comment(c: dict, video_id: str, parent: str | None, owner: str | None) -> CommentRec | None:
+    sn = c.get("snippet") or {}
+    text = sn.get("textOriginal") or sn.get("textDisplay")
+    if not (isinstance(c.get("id"), str) and isinstance(text, str)):
+        return None
+    author = (sn.get("authorChannelId") or {}).get("value")
+    return CommentRec(video_id=video_id, comment_id=c["id"], text=text, parent_id=parent,
+                      like_count=_int(sn.get("likeCount")), published_at=sn.get("publishedAt"),
+                      by_creator=bool(owner and author == owner))
+
+
 def _api_item(it: dict, out: "_Acc") -> None:
     snip = it.get("snippet") or {}
     stats = it.get("statistics") or {}
     kind = it.get("kind", "")
     raw_id = it.get("id")
+
+    if kind == "youtube#commentThread":            # commentThreads.list
+        vid, owner = snip.get("videoId"), snip.get("channelId")
+        top = snip.get("topLevelComment") or {}
+        if not vid or not top:
+            out.skipped += 1
+            return
+        rec = _api_comment(top, vid, None, owner)
+        if rec:
+            out.comment(rec)
+        for r in ((it.get("replies") or {}).get("comments") or []):
+            rr = _api_comment(r, vid, top.get("id"), owner)
+            if rr:
+                out.comment(rr)
+        return
 
     is_channel = kind == "youtube#channel" or (
         not kind and "subscriberCount" in stats and isinstance(raw_id, str))
@@ -198,11 +248,15 @@ class _Acc:
     def __init__(self) -> None:
         self._videos: dict[str, VideoRec] = {}
         self._channels: dict[str, ChannelRec] = {}
+        self._comments: dict[str, CommentRec] = {}
         self.skipped = 0
         self.sources: set[str] = set()
 
     def video(self, v: VideoRec) -> None:
         self._videos[v.video_id] = v          # last one in a single pull wins
+
+    def comment(self, c: CommentRec) -> None:
+        self._comments[c.comment_id] = c
 
     def channel(self, c: ChannelRec) -> None:
         prev = self._channels.get(c.channel_id)
@@ -253,4 +307,5 @@ def parse(text: str) -> Parsed:
                 acc.sources.add("yt-dlp")
                 _ytdlp(o, None, acc)
     source = "mixed" if len(acc.sources) > 1 else (next(iter(acc.sources), "unknown"))
-    return Parsed(source, list(acc._videos.values()), list(acc._channels.values()), acc.skipped)
+    return Parsed(source, list(acc._videos.values()), list(acc._channels.values()), acc.skipped,
+                  list(acc._comments.values()))

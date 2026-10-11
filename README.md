@@ -23,6 +23,10 @@ python -m spinwheel dashboard -o dashboard.html
 python -m spinwheel suggest --from-data 10       # uses your top topics and untested gaps as seeds
 python -m spinwheel suggest "van life" --expand  # or your own keywords; --expand tries "van life a" .. "van life z"
 
+# 4. Optional: read the comments on your biggest videos (needs yt-dlp)
+python -m spinwheel comments --dry-run           # which videos (over 10,000 views) would be fetched
+python -m spinwheel comments                     # fetch top comments for them, most-viewed first
+
 python -m spinwheel status                       # what's stored
 ```
 
@@ -47,6 +51,7 @@ Per channel (yours or a competitor's), from videos older than 14 days so new upl
 | Moving right now | Which video to promote or follow up while it's moving |
 | Content ideas | Ranked ideas with their evidence and a "Copy brief" button each (see below) |
 | Keyword research | Which topics work on this channel, which work on other channels but are untested here, and what people type into YouTube search |
+| Audience asks | Questions and requests from the comments of your most-viewed videos, ranked by likes |
 | Title changes | Your own A/B history, which only exists because old pulls are kept |
 | Channels | You vs competitors: size, growth, typical views, views per subscriber, cadence |
 | Breakouts across channels | Videos that got far more views than their channel's subscriber count would suggest |
@@ -57,6 +62,19 @@ Per channel (yours or a competitor's), from videos older than 14 days so new upl
 - **Channel outlier**: the channel's typical video earns 2× or more the views per subscriber of the *other tracked channels*. The whole channel is beating its size, so the format or niche may be the story, not one video. It needs 3+ tracked channels; with fewer, the dashboard shows "n/a" instead of guessing.
 
 A video can carry both flags. A video outlier on a *small* channel is usually the strongest case to study. Views ÷ subs uses the channel's current subscriber count, so it flatters old videos on channels that have grown since.
+
+## Comments
+
+`spinwheel comments` runs yt-dlp for videos with **more than** `--min-views` views (default 10,000) and stores their top-level comments, most liked first (default 100 each, 25 videos per run, 3 s apart). Videos fetched within `--refresh-days` (default 14) are skipped, and each fetch is stored as new snapshots, so like counts can be compared over time. `--dry-run` lists what it would fetch without touching the network. A video that fails (rate limit, "confirm you're not a bot") is reported and stores nothing; the rest continue, and the exit code is 1.
+
+The dashboard uses them in three places: an **Audience asks** table (comments that read as a *request* such as "can you make a video on...", or a *question*: a question mark and at least 4 words), the video dialog's top comments, and **Audience asked** ideas. Your own comments and replies are excluded. "vs typical" is a comment's likes against the median comment on the same video, so a big video doesn't win on volume alone. Comments follow the Shorts / long-form toggle.
+
+Things worth knowing:
+
+- yt-dlp reports `comment_count` as the number of comments it *fetched*, not the video's real total. Spinwheel treats that count as unknown, so engagement keeps using the real total from your normal pulls.
+- Comments are other people's words. They are shown as plain text only, and in a copied brief they are labelled as quoted data, not instructions.
+- Commenter names are not stored in the comment tables. The raw yt-dlp output is still kept verbatim (it includes handles), compressed once it exceeds 100 KB; `db.read_raw()` returns it unchanged. The database is local to you; keep that in mind before sharing it.
+- Comments need yt-dlp. The YouTube Data API's `commentThreads.list` output is also understood by `ingest`.
 
 ## Shorts vs long-form
 
@@ -113,6 +131,8 @@ spinwheel/analysis.py    all the metrics and findings (tested)
 spinwheel/topics.py      phrases, topic stats, cross-channel gaps
 spinwheel/ideas.py       ranked ideas + copyable briefs
 spinwheel/suggest.py     YouTube autocomplete fetch, stored append-only
+spinwheel/comments.py    picks videos over the view threshold, fetches comments via yt-dlp
+spinwheel/audience.py    classifies comments as requests / questions
 spinwheel/dashboard.html the page; analysis JSON is embedded at build time
 tests/                   python -m unittest discover -s tests
 ```

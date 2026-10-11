@@ -86,6 +86,31 @@ def entry(v, ch, when):
     return e
 
 
+REQUESTS = ["Can you make a video on {other} next?", "Please do a part 2 of this one", "Would love to see you try {other}",
+            "What about {other}? Would watch that", "You should do a full video on {other}", "Next video: {other} please!"]
+QUESTIONS = ["Does this work for {topic} if you're a total beginner?", "How much did the {topic} setup cost in total?",
+             "Is {topic} still worth it in 2026 or is it overhyped?", "What would you change about {topic} if you started over?"]
+NOISE = ["Great video!", "First!", "Subscribed", "Underrated channel", "lol same", "this helped a lot, thanks", "Algorithm brought me here"]
+
+
+def fake_comments(rng, v, views):
+    """SYNTHETIC top-level comments in yt-dlp's shape (parent 'root'), most liked first."""
+    n, out = rng.randint(14, 30), []
+    for i in range(n):
+        r = rng.random()
+        other = rng.choice(TOPICS)
+        text = (rng.choice(REQUESTS).format(other=other) if r < 0.18 else
+                rng.choice(QUESTIONS).format(topic=v["topic"]) if r < 0.38 else rng.choice(NOISE))
+        likes = int(views * 0.0006 * rng.lognormvariate(0, 1.1)) + (rng.randint(0, 3) if r >= 0.38 else rng.randint(0, 20))
+        out.append({"id": f"Ug{v['id']}{i:03d}", "parent": "root", "text": text, "like_count": likes,
+                    "author": "@demo-viewer", "author_is_uploader": False, "is_pinned": False,
+                    "timestamp": int((END - timedelta(days=rng.randint(1, 60))).timestamp())})
+    out.append({"id": f"Ug{v['id']}own", "parent": "root", "text": "Thanks for watching! Can you tell me what to cover next?",
+                "like_count": 40, "author": "@demo-channel", "author_is_uploader": True, "is_pinned": True,
+                "timestamp": int(END.timestamp())})       # the channel's own comment: must be ignored
+    return sorted(out, key=lambda c: -c["like_count"])
+
+
 def main(path):
     rng = random.Random(7)
     chans = [make_channel(rng, "UCdemoMine0001", "Demo: Your Channel", 42, 8200, 30000),
@@ -102,7 +127,17 @@ def main(path):
                        "entries": [entry(v, ch, when) for v in ch["vids"] if v["pub"] <= when]}
             ingest_text(conn, json.dumps(payload), pulled_at=when,
                         command=f"yt-dlp -J https://www.youtube.com/channel/{ch['cid']}/videos (synthetic)")
-    print(f"wrote {len(PULLS)} synthetic pulls x {len(chans)} channels to {path}")
+    # Comments, fetched the way `spinwheel comments` does: one yt-dlp-style video JSON per video over 10K views.
+    rc, fetched = random.Random(11), 0
+    for ch in chans:
+        for v in ch["vids"]:
+            e = entry(v, ch, END)
+            if v["pub"] <= END and e["view_count"] > 10_000 and rc.random() < 0.6:
+                e["comments"] = fake_comments(rc, v, e["view_count"])
+                ingest_text(conn, json.dumps(e), pulled_at=END + timedelta(hours=1),
+                            command=f"yt-dlp -J --skip-download --write-comments https://www.youtube.com/watch?v={v['id']} (synthetic)")
+                fetched += 1
+    print(f"wrote {len(PULLS)} synthetic pulls x {len(chans)} channels + comments for {fetched} videos to {path}")
 
 
 if __name__ == "__main__":

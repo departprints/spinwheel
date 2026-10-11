@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from statistics import median
 from typing import Any
 
+from . import audience as audience_mod
 from . import ideas as ideas_mod
 from . import topics as topics_mod
 
@@ -127,7 +128,11 @@ def _build_videos(v_rows, short_max: int = SHORT_MAX_SECONDS) -> dict[str, dict]
                 tags = []
             if tags:
                 break
-        views, likes, comments = latest["view_count"], latest["like_count"], latest["comment_count"]
+        # likes and comment_count come from whichever snapshot last had them: a comments-only pull leaves
+        # comment_count unknown (yt-dlp reports the number fetched, not the real total)
+        views = latest["view_count"]
+        likes = next((s_["like_count"] for s_ in reversed(snaps) if s_["like_count"] is not None), None)
+        comments = next((s_["comment_count"] for s_ in reversed(snaps) if s_["comment_count"] is not None), None)
         t_cap = parse_ts(latest["captured_at"])
         pub_dt = parse_ts(pub) if pub else None
         age = _days(t_cap, pub_dt) if pub_dt else None
@@ -340,10 +345,17 @@ def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SE
         if (v_rows or c_rows) else None
     suggestions = _suggestions(conn)
 
+    comment_summaries, asks_by_video = {}, {}
+    for vid, rows in _latest_comments(conn).items():
+        r = audience_mod.analyze_video(rows)
+        comment_summaries[vid], asks_by_video[vid] = r["summary"], r["asks"]
+    for vid, v in videos.items():
+        v["has_comments"] = vid in comment_summaries
+
     variants = {}
     for mode in FORMATS:
         subset = [dict(v) for v in videos.values() if mode == "all" or v["format"] == mode]
-        variants[mode] = _build_variant(mode, subset, channel_ids, ch_snaps, ref, suggestions)
+        variants[mode] = _build_variant(mode, subset, channel_ids, ch_snaps, ref, suggestions, asks_by_video)
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -352,13 +364,25 @@ def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SE
         "video_snapshots": len(v_rows), "channel_snapshots": len(c_rows),
         "mature_days": MATURE_DAYS, "min_group": MIN_GROUP, "outlier_x": OUTLIER_X,
         "min_channels": MIN_CHANNELS_TO_COMPARE,
-        "short_max": short_max, "format_basis": dict(Counter(v["format_basis"] for v in videos.values())),
+        "comment_min_views": 10_000, "short_max": short_max, "format_basis": dict(Counter(v["format_basis"] for v in videos.values())),
         "formats": [{"id": m, "label": FORMAT_LABELS[m]} for m in FORMATS],
-        "variants": variants, "history": history, "suggestions": suggestions,
+        "variants": variants, "history": history, "suggestions": suggestions, "comments": comment_summaries,
     }
 
 
-def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_snaps: dict, ref, suggestions: dict) -> dict:
+def _latest_comments(conn: sqlite3.Connection) -> dict[str, list]:
+    """video_id -> the rows of its most recent comment fetch."""
+    rows = conn.execute(
+        "SELECT c.* FROM comment_snapshots c JOIN (SELECT video_id, MAX(captured_at) AS m FROM comment_snapshots "
+        "GROUP BY video_id) l ON c.video_id = l.video_id AND c.captured_at = l.m").fetchall()
+    out: dict[str, list] = defaultdict(list)
+    for r in rows:
+        out[r["video_id"]].append(r)
+    return out
+
+
+def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_snaps: dict, ref, suggestions: dict,
+                   asks_by_video: dict) -> dict:
     by_channel: dict[str, list[dict]] = defaultdict(list)
     for v in subset:
         by_channel[v["channel_id"]].append(v)
@@ -402,6 +426,9 @@ def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_sna
         a = detail[c["id"]]
         others = {oc: detail[oc]["videos"] for oc in detail if oc != c["id"]}
         a["gaps"] = topics_mod.find_gaps(a["videos"], others, titles) if others else []
+        with_comments = [v for v in a["videos"] if v["has_comments"]]
+        a["asks"] = audience_mod.merge_asks([asks_by_video[v["id"]] for v in with_comments])
+        a["comment_videos"] = len(with_comments)
         a["ideas"] = ideas_mod.build_ideas(channel=c, a=a, gaps=a["gaps"], suggestions=suggestions,
                                            ref=ref, outlier_x=OUTLIER_X)
         a["packaging"] = ideas_mod.packaging(a)

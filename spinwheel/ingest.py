@@ -7,6 +7,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+from . import db
 from .adapters import parse
 
 
@@ -26,7 +27,7 @@ def utc_iso(value: str | datetime | None = None) -> str:
 def ingest_text(conn: sqlite3.Connection, text: str, *, pulled_at: str | datetime | None = None,
                 command: str | None = None) -> dict:
     parsed = parse(text)
-    if not parsed.videos and not parsed.channels:
+    if not parsed.videos and not parsed.channels and not parsed.comments:
         raise ValueError(
             f"nothing recognizable to store ({parsed.skipped} unrecognized object(s)). "
             "Expected yt-dlp JSON or YouTube Data API v3 JSON.")
@@ -38,7 +39,8 @@ def ingest_text(conn: sqlite3.Connection, text: str, *, pulled_at: str | datetim
             "INSERT INTO pulls(pulled_at, ingested_at, source, command, sha256) VALUES (?,?,?,?,?)",
             (when, now, parsed.source, command, hashlib.sha256(text.encode()).hexdigest()),
         ).lastrowid
-        conn.execute("INSERT INTO raw_payloads(pull_id, body) VALUES (?,?)", (pull_id, text))
+        body, encoding = db.pack_raw(text)
+        conn.execute("INSERT INTO raw_payloads(pull_id, body, encoding) VALUES (?,?,?)", (pull_id, body, encoding))
 
         for c in parsed.channels:
             conn.execute("INSERT OR IGNORE INTO channels(channel_id, first_seen_at) VALUES (?,?)",
@@ -59,5 +61,14 @@ def ingest_text(conn: sqlite3.Connection, text: str, *, pulled_at: str | datetim
                  json.dumps(v.tags), v.duration_s, v.view_count, v.like_count, v.comment_count,
                  v.thumbnail_url, v.width, v.height, v.page_url))
 
+        for c in parsed.comments:
+            conn.execute("INSERT OR IGNORE INTO videos(video_id, first_seen_at) VALUES (?,?)", (c.video_id, when))
+            conn.execute(
+                "INSERT INTO comment_snapshots(pull_id, video_id, comment_id, parent_id, captured_at, text, "
+                "like_count, published_at, by_creator, pinned) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (pull_id, c.video_id, c.comment_id, c.parent_id, when, c.text, c.like_count, c.published_at,
+                 int(c.by_creator), int(c.pinned)))
+
     return {"pull_id": pull_id, "source": parsed.source, "pulled_at": when,
-            "videos": len(parsed.videos), "channels": len(parsed.channels), "skipped": parsed.skipped}
+            "videos": len(parsed.videos), "channels": len(parsed.channels), "comments": len(parsed.comments),
+            "skipped": parsed.skipped}

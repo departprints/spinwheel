@@ -7,7 +7,7 @@ import shlex
 import subprocess
 import sys
 
-from . import analysis, dashboard, db, suggest
+from . import analysis, comments, dashboard, db, suggest
 from .ingest import ingest_text
 
 
@@ -67,6 +67,28 @@ def cmd_suggest(args) -> int:
     return 1 if r["failed"] else 0
 
 
+def cmd_comments(args) -> int:
+    conn = db.connect(args.db)
+    videos = comments.eligible(conn, min_views=args.min_views, refresh_days=args.refresh_days, limit=args.max_videos)
+    if not videos:
+        print(f"no videos over {args.min_views:,} views are waiting for a comment fetch "
+              f"(fetched within {args.refresh_days:g} days are skipped). Pull channels first, or lower --min-views.")
+        return 0
+    print(f"{len(videos)} video(s) over {args.min_views:,} views, up to {args.max_comments} top-level comments each")
+    if args.dry_run:
+        for v in videos:
+            print(f"  {v['video_id']}  {v['views']:>12,} views  {v['title'] or ''}"[:120])
+        print("dry run: nothing fetched")
+        return 0
+    r = comments.collect(conn, videos, max_comments=args.max_comments, delay=args.delay, yt_dlp=args.yt_dlp,
+                         on_progress=print)
+    total = sum(r["stored"].values())
+    print(f"stored {total} comment(s) from {len(r['stored'])} video(s); {len(r['failed'])} failed")
+    for vid, err in r["failed"].items():
+        print(f"  {vid}: {err}", file=sys.stderr)
+    return 1 if r["failed"] else 0
+
+
 def cmd_status(args) -> int:
     conn = db.connect(args.db)
     q = lambda sql: conn.execute(sql).fetchone()[0]
@@ -75,7 +97,8 @@ def cmd_status(args) -> int:
           f"{q('SELECT COUNT(DISTINCT video_id) FROM video_snapshots')} videos "
           f"({q('SELECT COUNT(*) FROM video_snapshots')} snapshots), "
           f"{q('SELECT COUNT(DISTINCT channel_id) FROM channel_snapshots')} channels "
-          f"({q('SELECT COUNT(*) FROM channel_snapshots')} snapshots), {n_sug} searched keyword(s)")
+          f"({q('SELECT COUNT(*) FROM channel_snapshots')} snapshots), {n_sug} searched keyword(s), "
+          f"{q('SELECT COUNT(DISTINCT video_id) FROM comment_snapshots')} video(s) with comments")
     last = conn.execute("SELECT pulled_at, source, command FROM pulls ORDER BY id DESC LIMIT 1").fetchone()
     if last:
         print(f"last pull: {last['pulled_at']} via {last['source']}" + (f" ({last['command']})" if last["command"] else ""))
@@ -109,6 +132,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--expand", action="store_true", help="also try 'keyword a' .. 'keyword z' (27x the requests, many more long-tail phrases)")
     p.add_argument("--delay", type=float, default=1.0, help="seconds between requests (default 1)")
     p.set_defaults(fn=cmd_suggest)
+
+    p = sub.add_parser("comments", help="fetch top comments (via yt-dlp) for videos over a view threshold")
+    p.add_argument("--min-views", type=int, default=comments.DEFAULT_MIN_VIEWS, help="only videos with MORE views than this (default 10000)")
+    p.add_argument("--max-comments", type=int, default=100, help="top-level comments per video, most liked first (default 100)")
+    p.add_argument("--max-videos", type=int, default=25, help="videos per run, most viewed first (default 25)")
+    p.add_argument("--refresh-days", type=float, default=14, help="skip videos fetched within this many days (default 14)")
+    p.add_argument("--delay", type=float, default=3.0, help="seconds between videos (default 3)")
+    p.add_argument("--yt-dlp", default="yt-dlp", metavar="PATH", help="the yt-dlp executable")
+    p.add_argument("--dry-run", action="store_true", help="list the videos that would be fetched, fetch nothing")
+    p.set_defaults(fn=cmd_comments)
 
     p = sub.add_parser("status", help="what's in the database")
     p.set_defaults(fn=cmd_status)

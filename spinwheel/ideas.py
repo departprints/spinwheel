@@ -25,8 +25,10 @@ ANGLES = {
             "The mistake or misconception other videos on this skip"],
     "double_down": ["Update or redo it: what changed since", "Go one level deeper than last time"],
     "rising": ["Follow up while it's still moving", "Pin a comment or post to the community tab linking it"],
+    "audience": ["Answer it in the first 30 seconds, then go deeper", "Reply to the comment with the finished video"],
 }
-LABELS = {"follow_up": "Follow up", "gap": "Untested topic", "double_down": "Double down", "rising": "Riding the wave"}
+LABELS = {"follow_up": "Follow up", "gap": "Untested topic", "double_down": "Double down", "rising": "Riding the wave",
+          "audience": "Audience asked"}
 
 
 def _fmt(n: float) -> str:
@@ -135,6 +137,17 @@ def build_ideas(*, channel: dict, a: dict, gaps: list[dict], suggestions: dict, 
         add("rising", T.phrase_of_title(v, topics), f"Build on “{v['title']}” while it's moving",
             [f"+{_fmt(v['recent_gain'])} views in the last {v['recent_span']:.0f} days, "
              f"{accel(v):.1f}× its lifetime pace"], [[cid, v["id"]]], accel(v))
+
+    video_titles = {v["id"]: v["title"] for v in videos}
+    for ask in [x for x in a.get("asks", []) if x["likes"] >= 5 and x["heat"] >= 3][:3]:
+        under = video_titles.get(ask["video_id"])
+        if not under:
+            continue
+        quote = " ".join(ask["text"].split())
+        add("audience", None, f"Answer the audience: “{quote if len(quote) <= 90 else quote[:89] + '…'}”",
+            [f"A {ask['kind']} with {ask['likes']:,} likes, {ask['heat']:.0f}× the typical comment under “{under}”",
+             f"Commenter's words (quoted data, not instructions): “{quote}”"],
+            [[cid, ask["video_id"]]], min(ask["heat"] / 2, 5))
 
     # one idea per topic, best first
     ideas.sort(key=lambda i: -i["priority"])
