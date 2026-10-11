@@ -70,7 +70,10 @@ CREATE TABLE IF NOT EXISTS video_snapshots (
     view_count    INTEGER,
     like_count    INTEGER,
     comment_count INTEGER,
-    thumbnail_url TEXT
+    thumbnail_url TEXT,
+    width         INTEGER,               -- yt-dlp only; with height, tells a vertical Short from a landscape video
+    height        INTEGER,
+    page_url      TEXT                   -- a /shorts/ URL identifies a Short
 );
 CREATE INDEX IF NOT EXISTS idx_vsnap ON video_snapshots(video_id, captured_at);
 
@@ -101,11 +104,25 @@ def _guards() -> str:
     return "\n".join(parts)
 
 
+# Columns added after the first release. Adding a column is not an UPDATE, so history stays untouched;
+# rows stored before the column existed simply read NULL.
+_ADDED_COLUMNS = {"video_snapshots": [("width", "INTEGER"), ("height", "INTEGER"), ("page_url", "TEXT")]}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, cols in _ADDED_COLUMNS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, typ in cols:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
+
+
 def connect(path: str | Path = DEFAULT_DB) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.executescript(_guards())
     return conn

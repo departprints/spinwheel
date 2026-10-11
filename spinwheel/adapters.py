@@ -30,6 +30,9 @@ class VideoRec:
     like_count: int | None = None
     comment_count: int | None = None
     thumbnail_url: str | None = None
+    width: int | None = None
+    height: int | None = None
+    page_url: str | None = None
 
 
 @dataclass
@@ -88,6 +91,12 @@ def _ytdlp_published(o: dict) -> str | None:
     return None
 
 
+def _page_url(o: dict) -> str | None:
+    """A /shorts/ URL if any of the URL fields has one (that is how a Short is identified), else the page URL."""
+    urls = [u for u in (o.get("webpage_url"), o.get("original_url"), o.get("url")) if isinstance(u, str)]
+    return next((u for u in urls if "/shorts/" in u), urls[0] if urls else None)
+
+
 def _ytdlp(o: dict, parent: dict | None, out: "_Acc") -> None:
     entries = o.get("entries")
     if isinstance(entries, list):
@@ -123,6 +132,8 @@ def _ytdlp(o: dict, parent: dict | None, out: "_Acc") -> None:
         like_count=_int(o.get("like_count")),
         comment_count=_int(o.get("comment_count")),
         thumbnail_url=o.get("thumbnail"),
+        width=_int(o.get("width")), height=_int(o.get("height")),
+        page_url=_page_url(o),
     ))
     if cid and o.get("channel_follower_count") is not None:
         out.channel(ChannelRec(cid, o.get("channel") or o.get("uploader"),

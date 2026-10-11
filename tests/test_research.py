@@ -57,23 +57,23 @@ class Gaps(unittest.TestCase):
         self.d = analysis.build_dashboard_data(self.conn)
 
     def test_topic_that_works_elsewhere_and_is_absent_here_is_a_gap(self):
-        gaps = {g["phrase"]: g for g in self.d["detail"]["UCown"]["gaps"]}
+        gaps = {g["phrase"]: g for g in self.d["variants"]["all"]["detail"]["UCown"]["gaps"]}
         self.assertIn("zebra garden", gaps)
         self.assertGreaterEqual(gaps["zebra garden"]["median_score"], 1.3)
         self.assertEqual(gaps["zebra garden"]["channels"], ["UCoth"])
 
     def test_nothing_is_a_gap_for_the_channel_that_already_covers_it(self):
-        self.assertNotIn("zebra garden", [g["phrase"] for g in self.d["detail"]["UCoth"]["gaps"]])
+        self.assertNotIn("zebra garden", [g["phrase"] for g in self.d["variants"]["all"]["detail"]["UCoth"]["gaps"]])
 
     def test_a_single_channel_has_no_gaps(self):
         conn = mem()
         channel(conn, "UCsolo", 100, [(f"Alpha {i}", 100, []) for i in range(6)])
-        self.assertEqual(analysis.build_dashboard_data(conn)["detail"]["UCsolo"]["gaps"], [])
+        self.assertEqual(analysis.build_dashboard_data(conn)["variants"]["all"]["detail"]["UCsolo"]["gaps"], [])
 
     def test_ideas_cover_follow_up_and_gap_and_carry_a_brief(self):
-        ideas = {(i["type"], i["topic"]): i for i in self.d["detail"]["UCown"]["ideas"]}
+        ideas = {(i["type"], i["topic"]): i for i in self.d["variants"]["all"]["detail"]["UCown"]["ideas"]}
         self.assertIn(("gap", "zebra garden"), ideas)
-        fu = next(i for i in self.d["detail"]["UCown"]["ideas"] if i["type"] == "follow_up")
+        fu = next(i for i in self.d["variants"]["all"]["detail"]["UCown"]["ideas"] if i["type"] == "follow_up")
         self.assertIn("Alpha big win", fu["headline"])
         self.assertIn("Why this idea", fu["brief"])
         self.assertEqual(fu["evidence"][0][0], "UCown")
@@ -129,7 +129,7 @@ class Suggestions(unittest.TestCase):
         conn = mem()
         channel(conn, "UCown", 1000, [(f"Alpha story {w}", 100, []) for w in "abcdef"] + [("Alpha big win", 900, [])])
         suggest.collect(conn, ["alpha"], fetch_fn=lambda q: ["alpha beta", "alpha gamma"])
-        ideas = analysis.build_dashboard_data(conn)["detail"]["UCown"]["ideas"]
+        ideas = analysis.build_dashboard_data(conn)["variants"]["all"]["detail"]["UCown"]["ideas"]
         searched = [i for i in ideas if i["searches"]]
         self.assertTrue(searched and searched[0]["searches"][0]["text"] == "alpha beta")
 

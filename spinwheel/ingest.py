@@ -53,11 +53,11 @@ def ingest_text(conn: sqlite3.Connection, text: str, *, pulled_at: str | datetim
                          (v.video_id, when))
             conn.execute(
                 "INSERT INTO video_snapshots(pull_id, video_id, captured_at, channel_id, published_at, "
-                "title, description, tags, duration_s, view_count, like_count, comment_count, thumbnail_url) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "title, description, tags, duration_s, view_count, like_count, comment_count, thumbnail_url, "
+                "width, height, page_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (pull_id, v.video_id, when, v.channel_id, v.published_at, v.title, v.description,
                  json.dumps(v.tags), v.duration_s, v.view_count, v.like_count, v.comment_count,
-                 v.thumbnail_url))
+                 v.thumbnail_url, v.width, v.height, v.page_url))
 
     return {"pull_id": pull_id, "source": parsed.source, "pulled_at": when,
             "videos": len(parsed.videos), "channels": len(parsed.channels), "skipped": parsed.skipped}

@@ -155,6 +155,7 @@ def brief(channel: dict, idea: dict) -> str:
     p = idea["packaging"]
     lines = [f"# Video idea: {idea['headline']}",
              f"Channel: {channel['title']}" + (f" ({_fmt(channel['subscribers'])} subscribers)" if channel.get("subscribers") else ""),
+             ] + ([f"Format: {channel['format']} only (the numbers below are for this format)"] if channel.get("format") not in (None, "All videos") else []) + [
              "", "## Why this idea"] + [f"- {w}" for w in idea["why"]]
     pk = []
     if p["length"]:

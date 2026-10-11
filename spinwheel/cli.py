@@ -41,7 +41,7 @@ def cmd_pull(args) -> int:
 
 def cmd_dashboard(args) -> int:
     conn = db.connect(args.db)
-    path = dashboard.write(conn, args.output)
+    path = dashboard.write(conn, args.output, short_max=args.short_max)
     print(f"dashboard written to {path}")
     return 0
 
@@ -99,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("dashboard", help="build the HTML dashboard")
     p.add_argument("-o", "--output", default="dashboard.html")
+    p.add_argument("--short-max", type=int, default=60, metavar="SECONDS",
+                   help="when a pull has no /shorts/ URL or width/height, videos up to this length count as Shorts (default 60)")
     p.set_defaults(fn=cmd_dashboard)
 
     p = sub.add_parser("suggest", help="store YouTube search autocomplete for keywords (search-demand signal)")

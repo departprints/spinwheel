@@ -58,6 +58,23 @@ Per channel (yours or a competitor's), from videos older than 14 days so new upl
 
 A video can carry both flags. A video outlier on a *small* channel is usually the strongest case to study. Views ÷ subs uses the channel's current subscriber count, so it flatters old videos on channels that have grown since.
 
+## Shorts vs long-form
+
+The **Format** toggle (All / Long-form / Shorts) at the top scopes the whole page: tiles, findings, charts, the video table, ideas, topics, gaps, the channel comparison and breakouts. It is in the URL (`#channel=…&format=short`), so you can bookmark a view.
+
+Each format is analysed *on its own*, not filtered after the fact. A Short and a ten-minute video live on different view scales, so "2× the channel median" only means something against the same format: in a channel with mostly Shorts, a mixed median would make every long-form video look like a flop. In the Shorts view, length is bucketed in seconds (under 15 s ... 1-3 min), and ideas and gaps compare Shorts with other Shorts.
+
+**How a Short is detected**, best evidence first (each video records which rule decided it, and the page shows the counts):
+
+1. A `/shorts/` URL: Short.
+2. Width and height known: vertical and 3 minutes or less is a Short; anything else is long-form.
+3. Neither: 60 seconds or less is a Short. This is an approximation; change it with `dashboard --short-max 180`.
+4. Nothing known: long-form.
+
+yt-dlp gives the URL and dimensions (full, non-flat output gives dimensions; the Shorts tab gives `/shorts/` URLs). The YouTube Data API gives neither, so API pulls rely on rule 3. If part of your data was classified by length alone, the page says how many videos.
+
+Databases created before this feature are upgraded in place (three new columns; old rows read empty and fall back to rule 3, nothing is rewritten).
+
 ## Keyword research and content ideas
 
 **Topics** are 1-3 word phrases pulled from titles and tags. Generic format words ("tips", "mistakes", "tried", "guide", "review", ...) can't start or end a phrase, so "7 sourdough tips that changed everything" gives *sourdough*, not *tips that changed*. A phrase needs 2+ videos older than 14 days. Lift is the phrase's median views against the channel median. The word list is `FORMAT` in `spinwheel/topics.py`; edit it if your niche's real topics get filtered out, or format words slip through.
@@ -104,6 +121,7 @@ tests/                   python -m unittest discover -s tests
 
 - Thumbnail changes aren't detected: YouTube keeps the same thumbnail URL when the image changes. Title changes are.
 - Publish-day buckets use UTC dates. yt-dlp gives a date only for some outputs; the Data API gives a full time.
+- Shorts detection by length alone is approximate: a 50-second landscape video is counted as a Short, and a 90-second Short as long-form, unless the pull carries a URL or dimensions.
 - Topic detection works on words, not meaning: synonyms count as different topics, and a generic phrase can occasionally rank as one.
 - Gaps only know what you've pulled. A topic you covered on a channel you haven't pulled still shows as untested.
 - If a video drops out of later pulls (deleted, or beyond `--playlist-end`) its last snapshot is still used.

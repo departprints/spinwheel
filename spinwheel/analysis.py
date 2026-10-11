@@ -11,7 +11,7 @@ import json
 import math
 import re
 import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from statistics import median
 from typing import Any
@@ -27,6 +27,13 @@ MIN_CHANNELS_TO_COMPARE = 3   # a channel needs at least 2 others to be compared
 BREAKOUTS_SHOWN = 15
 UNKNOWN_CHANNEL = "(unknown channel)"
 
+FORMATS = ("all", "long", "short")
+SHORT_MAX_SECONDS = 60          # fallback when a pull has neither a /shorts/ URL nor width/height
+SHORTS_PORTRAIT_MAX = 180       # vertical videos up to 3 minutes are Shorts (YouTube's limit since Oct 2024)
+FORMAT_LABELS = {"all": "All videos", "long": "Long-form", "short": "Shorts"}
+SHORT_BUCKETS = [
+    (0, 15, "Under 15 s"), (15, 30, "15–30 s"), (30, 45, "30–45 s"), (45, 60, "45–60 s"), (60, float("inf"), "1–3 min"),
+]
 DURATION_BUCKETS = [
     (0, 60, "Under 1 min"), (60, 240, "1–4 min"), (240, 480, "4–8 min"),
     (480, 900, "8–15 min"), (900, 1800, "15–30 min"), (1800, float("inf"), "30+ min"),
@@ -81,7 +88,25 @@ def _load(conn: sqlite3.Connection):
     return v_rows, c_rows, pulls
 
 
-def _build_videos(v_rows) -> dict[str, dict]:
+def classify_format(snaps, short_max: int = SHORT_MAX_SECONDS) -> tuple[str, str]:
+    """('short' | 'long', how we knew). Best evidence first:
+      url       a /shorts/ URL
+      shape     width and height known: vertical and <= 3 min is a Short, anything else is long-form
+      duration  neither of the above: <= short_max seconds is a Short (an approximation)
+      none      nothing to go on: treated as long-form"""
+    if any(s["page_url"] and "/shorts/" in s["page_url"] for s in snaps):
+        return "short", "url"
+    dur = next((s["duration_s"] for s in reversed(snaps) if s["duration_s"] is not None), None)
+    wh = next(((s["width"], s["height"]) for s in reversed(snaps) if s["width"] and s["height"]), None)
+    if wh:
+        w, h = wh
+        return ("short" if h > w and (dur is None or dur <= SHORTS_PORTRAIT_MAX) else "long"), "shape"
+    if dur is not None:
+        return ("short" if dur <= short_max else "long"), "duration"
+    return "long", "none"
+
+
+def _build_videos(v_rows, short_max: int = SHORT_MAX_SECONDS) -> dict[str, dict]:
     by_vid: dict[str, list] = defaultdict(list)
     for r in v_rows:
         by_vid[r["video_id"]].append(r)
@@ -120,8 +145,9 @@ def _build_videos(v_rows) -> dict[str, dict]:
             if s["title"]:
                 prev_title = s["title"]
 
+        fmt, basis = classify_format(snaps, short_max)
         videos[vid] = {
-            "id": vid, "channel_id": cid, "title": title,
+            "id": vid, "channel_id": cid, "title": title, "format": fmt, "format_basis": basis,
             "published": pub, "age_days": age,
             "duration_s": next((s["duration_s"] for s in reversed(snaps) if s["duration_s"] is not None), None),
             "views": views, "likes": likes, "comments": comments,
@@ -156,10 +182,10 @@ def _lift(m: float | None, base: float | None) -> float | None:
     return m / base if m is not None and base else None
 
 
-def _duration_label(s: int | None) -> str | None:
+def _duration_label(s: int | None, buckets=DURATION_BUCKETS) -> str | None:
     if s is None:
         return None
-    return next(label for lo, hi, label in DURATION_BUCKETS if lo <= s < hi)
+    return next(label for lo, hi, label in buckets if lo <= s < hi)
 
 
 def _fmt(n: float) -> str:
@@ -175,7 +201,7 @@ def _short(t: str, n: int = 60) -> str:
     return t if len(t) <= n else t[: n - 1] + "…"
 
 
-def analyze_channel(vids: list[dict], subs: int | None = None) -> dict:
+def analyze_channel(vids: list[dict], subs: int | None = None, mode: str = "all") -> dict:
     mature = [v for v in vids if v["mature"]]
     base = _med([v["views"] for v in mature])
     if len(mature) >= MIN_GROUP:
@@ -183,9 +209,10 @@ def analyze_channel(vids: list[dict], subs: int | None = None) -> dict:
             v["score"] = _lift(v["views"], base)
 
     # duration
-    dg = _group_stats(mature, lambda v: _duration_label(v["duration_s"]))
+    buckets = SHORT_BUCKETS if mode == "short" else DURATION_BUCKETS
+    dg = _group_stats(mature, lambda v: _duration_label(v["duration_s"], buckets))
     durations = [{"label": lbl, "n": len(dg[lbl]), "median_views": _med([v["views"] for v in dg[lbl]])}
-                 for _, _, lbl in DURATION_BUCKETS if lbl in dg]
+                 for _, _, lbl in buckets if lbl in dg]
 
     # weekday (UTC date of publish)
     wg = _group_stats(mature, lambda v: WEEKDAYS[parse_ts(v["published"]).weekday()] if v["published"] else None)
@@ -296,29 +323,53 @@ def _findings(mature, base, durations, weekdays, features, kws, movers, vids, su
 
 # ------------------------------------------------------------------- top level
 
-def build_dashboard_data(conn: sqlite3.Connection) -> dict:
+def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SECONDS) -> dict:
+    """Everything the page shows, computed three times: for all videos, for long-form only and for Shorts
+    only. Each slice is analysed on its own (its own medians, outliers, topics, gaps, ideas), because a
+    Short's views say nothing about how a ten-minute video is doing."""
     v_rows, c_rows, pulls = _load(conn)
-    videos = _build_videos(v_rows)
-
-    by_channel: dict[str, list[dict]] = defaultdict(list)
-    for v in videos.values():
-        by_channel[v["channel_id"]].append(v)
+    videos = _build_videos(v_rows, short_max)
+    history = {vid: v.pop("history") for vid, v in videos.items()}     # shared by all slices, sent once
 
     ch_snaps: dict[str, list] = defaultdict(list)
     for r in c_rows:
         ch_snaps[r["channel_id"]].append(r)
+    channel_ids = sorted({v["channel_id"] for v in videos.values()} | set(ch_snaps))
 
     ref = parse_ts(max([r["captured_at"] for r in v_rows] + [r["captured_at"] for r in c_rows])) \
         if (v_rows or c_rows) else None
+    suggestions = _suggestions(conn)
 
-    channels = []
-    detail = {}
-    for cid in sorted(set(by_channel) | set(ch_snaps)):
+    variants = {}
+    for mode in FORMATS:
+        subset = [dict(v) for v in videos.values() if mode == "all" or v["format"] == mode]
+        variants[mode] = _build_variant(mode, subset, channel_ids, ch_snaps, ref, suggestions)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "data_through": ref.strftime("%Y-%m-%dT%H:%M:%SZ") if ref else None,
+        "pulls": len(pulls), "first_pull": pulls[0][0] if pulls else None,
+        "video_snapshots": len(v_rows), "channel_snapshots": len(c_rows),
+        "mature_days": MATURE_DAYS, "min_group": MIN_GROUP, "outlier_x": OUTLIER_X,
+        "min_channels": MIN_CHANNELS_TO_COMPARE,
+        "short_max": short_max, "format_basis": dict(Counter(v["format_basis"] for v in videos.values())),
+        "formats": [{"id": m, "label": FORMAT_LABELS[m]} for m in FORMATS],
+        "variants": variants, "history": history, "suggestions": suggestions,
+    }
+
+
+def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_snaps: dict, ref, suggestions: dict) -> dict:
+    by_channel: dict[str, list[dict]] = defaultdict(list)
+    for v in subset:
+        by_channel[v["channel_id"]].append(v)
+
+    channels, detail = [], {}
+    for cid in channel_ids:
         snaps = ch_snaps.get(cid, [])
         title = next((s["title"] for s in reversed(snaps) if s["title"]), cid)
         subs_pts = [s for s in snaps if s["subscribers"] is not None]
         subs = subs_pts[-1]["subscribers"] if subs_pts else None
-        a = analyze_channel(by_channel.get(cid, []), subs)
+        a = analyze_channel(by_channel.get(cid, []), subs, mode)
         for v in a["videos"]:
             v["subs"] = subs
             v["views_per_sub"] = v["views"] / subs if subs and v["views"] is not None else None
@@ -338,6 +389,7 @@ def build_dashboard_data(conn: sqlite3.Connection) -> dict:
             "median_engagement": a["median_engagement"], "uploads_90d": recent_uploads,
             "views_per_sub": a["median_views"] / subs if subs and a["median_views"] else None,
             "size_ratio": None, "size_ref": None, "size_outlier": None,
+            "format": FORMAT_LABELS[mode],
             "last_pulled": max([s["captured_at"] for s in snaps] +
                                [v["captured_at"] for v in a["videos"]] or [""]),
         })
@@ -345,7 +397,6 @@ def build_dashboard_data(conn: sqlite3.Connection) -> dict:
         detail[cid] = a
 
     _compare_channel_sizes(channels, detail)
-    suggestions = _suggestions(conn)
     titles = {c["id"]: c["title"] for c in channels}
     for c in channels:
         a = detail[c["id"]]
@@ -356,19 +407,10 @@ def build_dashboard_data(conn: sqlite3.Connection) -> dict:
         a["packaging"] = ideas_mod.packaging(a)
         a["style"] = ideas_mod.style_titles(a["videos"])
         del a["topics_all"]
-    for v in videos.values():              # internal helpers, not for the page
+    for v in subset:                       # internal helpers, not for the page
         v.pop("_phrases", None)
     channels.sort(key=lambda c: (-c["n_videos"], c["title"]))
-    return {
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "data_through": ref.strftime("%Y-%m-%dT%H:%M:%SZ") if ref else None,
-        "pulls": len(pulls), "first_pull": pulls[0][0] if pulls else None,
-        "video_snapshots": len(v_rows), "channel_snapshots": len(c_rows),
-        "mature_days": MATURE_DAYS, "min_group": MIN_GROUP, "outlier_x": OUTLIER_X,
-        "min_channels": MIN_CHANNELS_TO_COMPARE,
-        "channels": channels, "detail": detail, "breakouts": _breakouts(detail),
-        "suggestions": suggestions,
-    }
+    return {"channels": channels, "detail": detail, "breakouts": _breakouts(detail)}
 
 
 def _compare_channel_sizes(channels: list[dict], detail: dict) -> None:
@@ -417,10 +459,10 @@ def _suggestions(conn: sqlite3.Connection) -> dict:
 
 def top_seeds(conn: sqlite3.Connection, n: int) -> list[str]:
     """Phrases worth asking autocomplete about: the best topics and untested gaps across channels."""
-    data = build_dashboard_data(conn)
+    v = build_dashboard_data(conn)["variants"]["all"]
     seeds: list[str] = []
-    for c in data["channels"]:
-        a = data["detail"][c["id"]]
+    for c in v["channels"]:
+        a = v["detail"][c["id"]]
         for phrase in [g["phrase"] for g in a["gaps"]] + [t["phrase"] for t in a["topics_top"]]:
             if len(phrase.split()) <= 3 and phrase not in seeds:
                 seeds.append(phrase)

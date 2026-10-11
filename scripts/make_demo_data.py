@@ -41,8 +41,10 @@ def make_channel(rng, cid, name, n_videos, subs0, scale, extra_topics=()):
         pub = END - timedelta(days=rng.randint(3, 330), hours=rng.randint(0, 23))
         topic, hook = rng.choice(TOPICS + list(extra_topics)), rng.choice(HOOKS)
         title = hook.format(n=rng.choice([3, 5, 7, 9, 10]), t=topic)
-        dur = rng.choice([45, 180, 360, 600, 720, 840, 1200, 2400])
+        dur = rng.choice([20, 40, 55, 360, 600, 720, 840, 1200, 2400])
         q = rng.lognormvariate(0, 0.55)
+        if dur <= 60:
+            q *= 2.5          # planted: Shorts get a different view scale than long-form
         if any(ch.isdigit() for ch in title):
             q *= 1.6
         if 480 <= dur < 900:
@@ -69,11 +71,19 @@ def entry(v, ch, when):
     # one planted A/B title test: the title changes after the 3rd pull
     if v is ch["vids"][0] and when >= PULLS[3]:
         title = "I changed my mind about " + v["topic"]
-    return {"id": v["id"], "title": title, "description": f"Demo video about {v['topic']}",
-            "timestamp": int(v["pub"].timestamp()), "duration": v["dur"], "view_count": vw,
-            "like_count": int(vw * 0.04), "comment_count": int(vw * 0.004),
-            "channel_id": ch["cid"], "tags": [v["topic"]],
-            "thumbnail": f"https://i.ytimg.com/vi/{v['id']}/maxresdefault.jpg"}
+    e = {"id": v["id"], "title": title, "description": f"Demo video about {v['topic']}",
+         "timestamp": int(v["pub"].timestamp()), "duration": v["dur"], "view_count": vw,
+         "like_count": int(vw * 0.04), "comment_count": int(vw * 0.004),
+         "channel_id": ch["cid"], "tags": [v["topic"]],
+         "thumbnail": f"https://i.ytimg.com/vi/{v['id']}/maxresdefault.jpg"}
+    # Each demo channel exposes a different amount of format evidence, like different pull styles would:
+    #   Your Channel: width/height (full yt-dlp)   Competitor A: /shorts/ URLs (Shorts tab)   Small: duration only
+    short = v["dur"] <= 60
+    if ch["cid"].startswith("UCdemoMine"):
+        e["width"], e["height"] = (1080, 1920) if short else (1920, 1080)
+    elif ch["cid"].startswith("UCdemoRival"):
+        e["webpage_url"] = f"https://www.youtube.com/{'shorts/' if short else 'watch?v='}{v['id']}"
+    return e
 
 
 def main(path):

@@ -105,7 +105,7 @@ class Analysis(unittest.TestCase):
         ingest_text(conn, json.dumps(YTDLP_VIDEO), pulled_at="2026-01-01T00:00:00Z")
         ingest_text(conn, json.dumps(dict(YTDLP_VIDEO, title="B")), pulled_at="2026-01-08T00:00:00Z")
         d = analysis.build_dashboard_data(conn)
-        ch = d["detail"]["UC1"]["title_changes"]
+        ch = d["variants"]["all"]["detail"]["UC1"]["title_changes"]
         self.assertEqual((ch[0]["from"], ch[0]["to"]), ("Hello 5 things", "B"))
 
     def test_young_videos_are_not_scored(self):
@@ -115,7 +115,7 @@ class Analysis(unittest.TestCase):
                         pulled_at="2024-06-01T00:00:00Z")
         ingest_text(conn, json.dumps(dict(YTDLP_VIDEO, id="new", timestamp=1717200000, view_count=10**6)),
                     pulled_at="2024-06-02T00:00:00Z")
-        vids = {v["id"]: v for v in analysis.build_dashboard_data(conn)["detail"]["UC1"]["videos"]}
+        vids = {v["id"]: v for v in analysis.build_dashboard_data(conn)["variants"]["all"]["detail"]["UC1"]["videos"]}
         self.assertIsNone(vids["new"]["score"])
         self.assertIsNotNone(vids["old2"]["score"])
 
@@ -141,7 +141,7 @@ class Outliers(unittest.TestCase):
     def test_video_outlier_is_relative_to_its_own_channel(self):
         conn = mem()
         _channel(conn, "UCa", 1000, [100, 100, 100, 100, 100, 100, 100, 900])
-        vids = {v["views"]: v for v in analysis.build_dashboard_data(conn)["detail"]["UCa"]["videos"]}
+        vids = {v["views"]: v for v in analysis.build_dashboard_data(conn)["variants"]["all"]["detail"]["UCa"]["videos"]}
         self.assertTrue(vids[900]["video_outlier"])
         self.assertFalse(vids[100]["video_outlier"])
         self.assertEqual(vids[900]["subs"], 1000)
@@ -152,8 +152,8 @@ class Outliers(unittest.TestCase):
         _channel(conn, "UCa", 1000, [5000] * 5)            # 5 views per subscriber
         _channel(conn, "UCb", 100000, [500000] * 5)        # 5
         d = analysis.build_dashboard_data(conn)
-        self.assertTrue(all(c["size_outlier"] is None for c in d["channels"]))   # unknown, not False
-        self.assertTrue(all(v["channel_outlier"] is None for a in d["detail"].values() for v in a["videos"]))
+        self.assertTrue(all(c["size_outlier"] is None for c in d["variants"]["all"]["channels"]))   # unknown, not False
+        self.assertTrue(all(v["channel_outlier"] is None for a in d["variants"]["all"]["detail"].values() for v in a["videos"]))
 
     def test_channel_outlier_flags_the_one_beating_its_size(self):
         conn = mem()
@@ -161,19 +161,19 @@ class Outliers(unittest.TestCase):
         _channel(conn, "UCb", 100000, [500000] * 5)
         _channel(conn, "UCc", 1000, [50000] * 5)           # 50 views per subscriber vs 5 elsewhere
         d = analysis.build_dashboard_data(conn)
-        flags = {c["id"]: c["size_outlier"] for c in d["channels"]}
+        flags = {c["id"]: c["size_outlier"] for c in d["variants"]["all"]["channels"]}
         self.assertEqual(flags, {"UCa": False, "UCb": False, "UCc": True})
-        self.assertTrue(all(v["channel_outlier"] for v in d["detail"]["UCc"]["videos"]))
-        self.assertEqual(d["detail"]["UCc"]["findings"][0]["kind"], "channel")
-        self.assertEqual(d["breakouts"][0][0], "UCc")
+        self.assertTrue(all(v["channel_outlier"] for v in d["variants"]["all"]["detail"]["UCc"]["videos"]))
+        self.assertEqual(d["variants"]["all"]["detail"]["UCc"]["findings"][0]["kind"], "channel")
+        self.assertEqual(d["variants"]["all"]["breakouts"][0][0], "UCc")
 
     def test_missing_subscribers_gives_no_ratio_and_no_crash(self):
         conn = mem()
         ingest_text(conn, json.dumps({"id": "vid00000001", "title": "t", "view_count": 5,
                                       "timestamp": 1700000000, "channel_id": "UCx"}), pulled_at="2025-06-01T00:00:00Z")
         d = analysis.build_dashboard_data(conn)
-        self.assertIsNone(d["detail"]["UCx"]["videos"][0]["views_per_sub"])
-        self.assertIsNone(d["channels"][0]["views_per_sub"])
+        self.assertIsNone(d["variants"]["all"]["detail"]["UCx"]["videos"][0]["views_per_sub"])
+        self.assertIsNone(d["variants"]["all"]["channels"][0]["views_per_sub"])
 
 
 class DemoData(unittest.TestCase):
@@ -184,8 +184,8 @@ class DemoData(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             mod.main(f"{d}/x.db")
             data = analysis.build_dashboard_data(db.connect(f"{d}/x.db"))
-        self.assertEqual(len(data["channels"]), 3)
-        self.assertTrue(data["detail"]["UCdemoMine0001"]["findings"])
+        self.assertEqual(len(data["variants"]["all"]["channels"]), 3)
+        self.assertTrue(data["variants"]["all"]["detail"]["UCdemoMine0001"]["findings"])
 
 
 if __name__ == "__main__":
