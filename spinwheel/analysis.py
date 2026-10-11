@@ -28,6 +28,15 @@ MIN_CHANNELS_TO_COMPARE = 3   # a channel needs at least 2 others to be compared
 BREAKOUTS_SHOWN = 15
 UNKNOWN_CHANNEL = "(unknown channel)"
 
+# Performance tiers, as in the "setup guide" version of the YouTube outlier finder (inclusive comparisons):
+#   FIRE     views >= 100% of subscribers
+#   OUTLIER  views >= 30% of subscribers, or >= 5x the channel average
+#   HOT      views >= 10% of subscribers, or >= 2x the channel average
+# "Channel average" is the mean views of the channel's videos in the current format slice, and only
+# counts when the channel has at least MIN_GROUP such videos. Tiers apply at any video age.
+TIER_FIRE_PCT, TIER_OUTLIER_PCT, TIER_HOT_PCT = 1.0, 0.30, 0.10
+TIER_OUTLIER_AVG_X, TIER_HOT_AVG_X = 5.0, 2.0
+TIER_RANK = {"fire": 3, "outlier": 2, "hot": 1}
 FORMATS = ("all", "long", "short")
 SHORT_MAX_SECONDS = 60          # fallback when a pull has neither a /shorts/ URL nor width/height
 SHORTS_PORTRAIT_MAX = 180       # vertical videos up to 3 minutes are Shorts (YouTube's limit since Oct 2024)
@@ -87,6 +96,25 @@ def _load(conn: sqlite3.Connection):
     c_rows = conn.execute("SELECT * FROM channel_snapshots ORDER BY captured_at, id").fetchall()
     pulls = conn.execute("SELECT pulled_at FROM pulls ORDER BY pulled_at").fetchall()
     return v_rows, c_rows, pulls
+
+
+def tier_for(views: int | None, subs: int | None, avg: float | None) -> tuple[str | None, str | None]:
+    """(tier, why). `avg` is None when the channel has too few videos for an average to mean anything."""
+    if views is None:
+        return None, None
+    pct = views / subs if subs else None
+    ratio = views / avg if avg else None
+    if pct is not None and pct >= TIER_FIRE_PCT:
+        return "fire", "views ≥ 100% of subscribers"
+    if pct is not None and pct >= TIER_OUTLIER_PCT:
+        return "outlier", "views ≥ 30% of subscribers"
+    if ratio is not None and ratio >= TIER_OUTLIER_AVG_X:
+        return "outlier", "views ≥ 5× the channel average"
+    if pct is not None and pct >= TIER_HOT_PCT:
+        return "hot", "views ≥ 10% of subscribers"
+    if ratio is not None and ratio >= TIER_HOT_AVG_X:
+        return "hot", "views ≥ 2× the channel average"
+    return None, None
 
 
 def classify_format(snaps, short_max: int = SHORT_MAX_SECONDS) -> tuple[str, str]:
@@ -394,7 +422,10 @@ def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_sna
         subs_pts = [s for s in snaps if s["subscribers"] is not None]
         subs = subs_pts[-1]["subscribers"] if subs_pts else None
         a = analyze_channel(by_channel.get(cid, []), subs, mode)
+        counted = [v["views"] for v in a["videos"] if v["views"] is not None]
+        avg = sum(counted) / len(counted) if len(counted) >= MIN_GROUP else None
         for v in a["videos"]:
+            v["tier"], v["tier_why"] = tier_for(v["views"], subs, avg)
             v["subs"] = subs
             v["views_per_sub"] = v["views"] / subs if subs and v["views"] is not None else None
             v["video_outlier"] = v["score"] is not None and v["score"] >= OUTLIER_X
@@ -407,8 +438,9 @@ def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_sna
         if len(subs_pts) >= 2:
             delta = {"change": subs - subs_pts[0]["subscribers"],
                      "days": _days(parse_ts(subs_pts[-1]["captured_at"]), parse_ts(subs_pts[0]["captured_at"]))}
+        tier_counts = {t: sum(1 for v in a["videos"] if v["tier"] == t) for t in TIER_RANK}
         channels.append({
-            "id": cid, "title": title, "subscribers": subs, "subs_delta": delta,
+            "id": cid, "title": title, "subscribers": subs, "subs_delta": delta, "tier_counts": tier_counts,
             "n_videos": len(a["videos"]), "median_views": a["median_views"],
             "median_engagement": a["median_engagement"], "uploads_90d": recent_uploads,
             "views_per_sub": a["median_views"] / subs if subs and a["median_views"] else None,

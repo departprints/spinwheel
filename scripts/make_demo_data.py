@@ -113,10 +113,10 @@ def fake_comments(rng, v, views):
 
 def main(path):
     rng = random.Random(7)
-    chans = [make_channel(rng, "UCdemoMine0001", "Demo: Your Channel", 42, 8200, 30000),
-             make_channel(rng, "UCdemoRival002", "Demo: Competitor A", 30, 61000, 160000),
+    chans = [make_channel(rng, "UCdemoMine0001", "Demo: Your Channel", 42, 46000, 1400),
+             make_channel(rng, "UCdemoRival002", "Demo: Competitor A", 30, 390000, 9000),
              # small audience, big views: should be flagged as a channel outlier
-             make_channel(rng, "UCdemoSmall003", "Demo: Small Breakout", 30, 2100, 30000, EXCLUSIVE)]
+             make_channel(rng, "UCdemoSmall003", "Demo: Small Breakout", 30, 6200, 1500, EXCLUSIVE)]
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(path)
     for k, when in enumerate(PULLS):

@@ -76,6 +76,20 @@ Things worth knowing:
 - Commenter names are not stored in the comment tables. The raw yt-dlp output is still kept verbatim (it includes handles), compressed once it exceeds 100 KB; `db.read_raw()` returns it unchanged. The database is local to you; keep that in mind before sharing it.
 - Comments need yt-dlp. The YouTube Data API's `commentThreads.list` output is also understood by `ingest`.
 
+## Tiers, filters and the all-channels list
+
+Every video gets a performance tier against its channel's subscribers (inclusive comparisons):
+
+| Tier | Rule |
+|---|---|
+| FIRE | views ≥ 100% of subscribers |
+| OUTLIER | views ≥ 30% of subscribers, or ≥ 5× the channel average |
+| HOT | views ≥ 10% of subscribers, or ≥ 2× the channel average |
+
+The channel average is the mean views of the channel's videos in the current format slice and only counts with 3+ videos; with unknown subscribers only the average rules apply. Tiers apply at any video age (a day-old video with 30% of subscribers' worth of views is an OUTLIER), unlike the "vs median" score, which waits 14 days. This follows the setup-guide version of the [YouTube Outlier Finder](https://chadesheppard.com/videos/youtube-outlier-finder); its article body states the thresholds with `>` and without the average rules, and the page doesn't reconcile the two.
+
+The **Videos** table filters by tier and by publish date (24 hours, 7, 30 or 90 days, measured from your newest pull, not today; a date with no time of day counts the whole day), and a **This channel / All channels** switch lists every tracked channel's videos together. Morning check: All channels, last 24 hours, sort by Tier.
+
 ## Shorts vs long-form
 
 The **Format** toggle (All / Long-form / Shorts) at the top scopes the whole page: tiles, findings, charts, the video table, ideas, topics, gaps, the channel comparison and breakouts. It is in the URL (`#channel=…&format=short`), so you can bookmark a view.
