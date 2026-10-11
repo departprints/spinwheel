@@ -7,7 +7,7 @@ import shlex
 import subprocess
 import sys
 
-from . import analysis, comments, dashboard, db, suggest
+from . import analysis, comments, dashboard, db, discover, suggest
 from .ingest import ingest_text
 
 
@@ -84,12 +84,72 @@ def cmd_comments(args) -> int:
         print("dry run: nothing fetched")
         return 0
     r = comments.collect(conn, videos, max_comments=args.max_comments, delay=args.delay, replies=args.replies,
-                         yt_dlp=args.yt_dlp, on_progress=print)
+                         yt_dlp=args.yt_dlp, extra=_extra(args), on_progress=print)
     total = sum(r["stored"].values())
     print(f"stored {total} comment(s) from {len(r['stored'])} video(s); {len(r['failed'])} failed")
     for vid, err in r["failed"].items():
         print(f"  {vid}: {err}", file=sys.stderr)
     return 1 if r["failed"] else 0
+
+
+def _extra(args) -> list[str]:
+    return shlex.split(args.yt_dlp_args or "")
+
+
+def cmd_search(args) -> int:
+    conn = db.connect(args.db)
+    queries = list(args.queries)
+    if args.all:
+        queries += discover.tracked_topics(conn)
+    if not queries:
+        print("usage: spinwheel search \"keyword\" [\"keyword\" ...]  or  --all (re-run every tracked topic)", file=sys.stderr)
+        return 2
+    print(f"searching YouTube for {len(dict.fromkeys(queries))} topic(s), {args.max_results} results each"
+          + (", flat (no publish dates or subscribers)" if args.fast else ""))
+    r = discover.search(conn, queries, max_results=args.max_results, fast=args.fast, delay=args.delay, yt_dlp=args.yt_dlp,
+                        extra=_extra(args), on_progress=print)
+    if not args.no_channels and r["done"]:
+        todo = discover.stale_channels(conn, refresh_days=args.refresh_days)
+        if todo:
+            print(f"refreshing subscriber counts for {len(todo)} channel(s)")
+            cr = discover.refresh_channels(conn, todo, yt_dlp=args.yt_dlp, extra=_extra(args))
+            print(f"  {len(cr['stored'])} updated, {len(cr['failed'])} without a count")
+    for q, err in r["failed"].items():
+        print(f"  {q}: FAILED, nothing stored ({err})", file=sys.stderr)
+    return 1 if r["failed"] else 0
+
+
+def cmd_channels(args) -> int:
+    conn = db.connect(args.db)
+    todo = discover.stale_channels(conn, refresh_days=args.refresh_days, limit=args.max_channels)
+    if not todo:
+        print(f"every channel with videos has a subscriber count from the last {args.refresh_days:g} days")
+        return 0
+    print(f"{len(todo)} channel(s) need a subscriber count")
+    if args.dry_run:
+        print("  " + ", ".join(todo[:12]) + (" ..." if len(todo) > 12 else "") + "\ndry run: nothing fetched")
+        return 0
+    r = discover.refresh_channels(conn, todo, delay=args.delay, yt_dlp=args.yt_dlp, extra=_extra(args), on_progress=print)
+    print(f"updated {len(r['stored'])} channel(s); {len(r['failed'])} failed")
+    for cid, err in r["failed"].items():
+        print(f"  {cid}: {err}", file=sys.stderr)
+    return 1 if r["failed"] else 0
+
+
+def cmd_enrich(args) -> int:
+    conn = db.connect(args.db)
+    ids = discover.undated_videos(conn, args.max_videos)
+    if not ids:
+        print("every video on record has a publish date")
+        return 0
+    print(f"{len(ids)} video(s) have no publish date (most viewed first)")
+    if args.dry_run:
+        print("dry run: nothing fetched")
+        return 0
+    r = discover.enrich(conn, ids, delay=args.delay, yt_dlp=args.yt_dlp, extra=_extra(args))
+    print(f"enriched {r['enriched']} of {r['requested']}" + (f"; {r['error']}" if r["error"] else
+          "" if r["enriched"] == r["requested"] else ". The rest were refused (YouTube may be asking for a login); retry later or pass --yt-dlp-args"))
+    return 0 if r["enriched"] else 1
 
 
 def cmd_status(args) -> int:
@@ -101,7 +161,8 @@ def cmd_status(args) -> int:
           f"({q('SELECT COUNT(*) FROM video_snapshots')} snapshots), "
           f"{q('SELECT COUNT(DISTINCT channel_id) FROM channel_snapshots')} channels "
           f"({q('SELECT COUNT(*) FROM channel_snapshots')} snapshots), {n_sug} searched keyword(s), "
-          f"{q('SELECT COUNT(DISTINCT video_id) FROM comment_snapshots')} video(s) with comments")
+          f"{q('SELECT COUNT(DISTINCT video_id) FROM comment_snapshots')} video(s) with comments, "
+          f"{q('SELECT COUNT(DISTINCT query) FROM searches')} tracked topic(s)")
     last = conn.execute("SELECT pulled_at, source, command FROM pulls ORDER BY id DESC LIMIT 1").fetchone()
     if last:
         print(f"last pull: {last['pulled_at']} via {last['source']}" + (f" ({last['command']})" if last["command"] else ""))
@@ -146,8 +207,36 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--refresh-days", type=float, default=14, help="skip videos fetched within this many days (default 14)")
     p.add_argument("--delay", type=float, default=3.0, help="seconds between videos (default 3)")
     p.add_argument("--yt-dlp", default="yt-dlp", metavar="PATH", help="the yt-dlp executable")
+    p.add_argument("--yt-dlp-args", metavar="ARGS", help='extra yt-dlp arguments, e.g. "--cookies-from-browser firefox"')
     p.add_argument("--dry-run", action="store_true", help="list the videos that would be fetched, fetch nothing")
     p.set_defaults(fn=cmd_comments)
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--yt-dlp", default="yt-dlp", metavar="PATH", help="the yt-dlp executable")
+    common.add_argument("--yt-dlp-args", metavar="ARGS", help='extra yt-dlp arguments, e.g. "--cookies-from-browser firefox" when YouTube asks to sign in')
+
+    p = sub.add_parser("search", parents=[common], help="find videos by keyword and track the keyword as a topic")
+    p.add_argument("queries", nargs="*", help="keywords to search for")
+    p.add_argument("--all", action="store_true", help="also re-run every topic searched before")
+    p.add_argument("--max-results", type=int, default=20, help="results per keyword (default 20)")
+    p.add_argument("--fast", action="store_true", help="skip the enrichment pass (no publish dates or subscriber counts)")
+    p.add_argument("--delay", type=float, default=3.0, help="seconds between keywords (default 3)")
+    p.add_argument("--no-channels", action="store_true", help="don't refresh subscriber counts afterwards")
+    p.add_argument("--refresh-days", type=float, default=7, help="subscriber counts newer than this are not refreshed (default 7)")
+    p.set_defaults(fn=cmd_search)
+
+    p = sub.add_parser("channels", parents=[common], help="refresh subscriber counts for channels that have videos on record")
+    p.add_argument("--refresh-days", type=float, default=7, help="skip channels counted within this many days (default 7)")
+    p.add_argument("--max-channels", type=int, default=50)
+    p.add_argument("--delay", type=float, default=1.0)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_channels)
+
+    p = sub.add_parser("enrich", parents=[common], help="retry publish dates and subscriber counts for videos that have none")
+    p.add_argument("--max-videos", type=int, default=50)
+    p.add_argument("--delay", type=float, default=3.0)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_enrich)
 
     p = sub.add_parser("status", help="what's in the database")
     p.set_defaults(fn=cmd_status)

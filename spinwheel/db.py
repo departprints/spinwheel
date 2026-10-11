@@ -8,6 +8,7 @@ Layout:
   channel_snapshots one row per channel per pull: subscribers, total views, ...
   search_suggestions YouTube autocomplete results per fetch, so new phrases can be spotted over time
   comment_snapshots  top-level comments per fetch with their like counts at that moment
+  searches           which video appeared for which keyword search (topic discovery), and at what rank
 
 Snapshot, payload and pull tables are protected by triggers that abort UPDATE and
 DELETE, so "not overwritten" is enforced by the database, not by convention.
@@ -95,6 +96,16 @@ CREATE TABLE IF NOT EXISTS comment_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_comments ON comment_snapshots(video_id, captured_at);
 
+CREATE TABLE IF NOT EXISTS searches (
+    id          INTEGER PRIMARY KEY,
+    pull_id     INTEGER NOT NULL REFERENCES pulls(id),
+    query       TEXT NOT NULL,           -- the tracked topic (lower-cased keyword search)
+    video_id    TEXT NOT NULL REFERENCES videos(video_id),
+    rank        INTEGER NOT NULL,        -- 0 = first search result
+    captured_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_searches ON searches(query, captured_at);
+
 CREATE TABLE IF NOT EXISTS search_suggestions (
     id          INTEGER PRIMARY KEY,
     captured_at TEXT NOT NULL,
@@ -108,7 +119,7 @@ CREATE INDEX IF NOT EXISTS idx_sugg ON search_suggestions(seed, captured_at);
 
 # Tables whose rows may never be modified or removed once written.
 _PROTECTED = ("pulls", "raw_payloads", "channel_snapshots", "video_snapshots", "videos", "channels",
-              "search_suggestions", "comment_snapshots")
+              "search_suggestions", "comment_snapshots", "searches")
 
 
 def _guards() -> str:

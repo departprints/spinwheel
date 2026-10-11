@@ -25,7 +25,9 @@ def utc_iso(value: str | datetime | None = None) -> str:
 
 
 def ingest_text(conn: sqlite3.Connection, text: str, *, pulled_at: str | datetime | None = None,
-                command: str | None = None) -> dict:
+                command: str | None = None, search_query: str | None = None) -> dict:
+    """Store one pull. With `search_query`, the videos in it are also recorded as that keyword search's
+    results, in the order they came back (rank 0 first)."""
     parsed = parse(text)
     if not parsed.videos and not parsed.channels and not parsed.comments:
         raise ValueError(
@@ -68,6 +70,11 @@ def ingest_text(conn: sqlite3.Connection, text: str, *, pulled_at: str | datetim
                 "like_count, published_at, by_creator, pinned) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (pull_id, c.video_id, c.comment_id, c.parent_id, when, c.text, c.like_count, c.published_at,
                  int(c.by_creator), int(c.pinned)))
+
+        if search_query and search_query.strip():
+            for rank, v in enumerate(parsed.videos):
+                conn.execute("INSERT INTO searches(pull_id, query, video_id, rank, captured_at) VALUES (?,?,?,?,?)",
+                             (pull_id, search_query.strip().lower(), v.video_id, rank, when))
 
     return {"pull_id": pull_id, "source": parsed.source, "pulled_at": when,
             "videos": len(parsed.videos), "channels": len(parsed.channels), "comments": len(parsed.comments),

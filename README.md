@@ -63,6 +63,19 @@ Per channel (yours or a competitor's), from videos older than 14 days so new upl
 
 A video can carry both flags. A video outlier on a *small* channel is usually the strongest case to study. Views ÷ subs uses the channel's current subscriber count, so it flatters old videos on channels that have grown since.
 
+## Finding videos by topic
+
+You don't have to name channels. `spinwheel search "cast iron" "sourdough starter"` runs a YouTube keyword search for each topic (20 results by default) and keeps a **video-to-topic mapping**: which video appeared for which keyword, at what rank, and when. Every channel that shows up is tracked from then on. `search --all` re-runs every topic you've searched before. No API key is used.
+
+A search is two steps because YouTube sometimes refuses individual videos ("Sign in to confirm you're not a bot"):
+
+1. a flat search, which reliably gives rank, title, views and channel for every result (stored with the topic);
+2. an enrichment pass for publish date, likes and the channel's subscriber count. Whatever succeeds is kept and the shortfall is reported ("4 could not be fetched").
+
+Subscriber counts are also refreshed per channel (`spinwheel channels`, run automatically after a search), which is fast and doesn't depend on the per-video step. `spinwheel enrich` retries videos that still have no publish date. Pass `--yt-dlp-args "--cookies-from-browser firefox"` to any of these when YouTube asks for a login. `--fast` skips enrichment.
+
+Honest limits: in testing from a cloud server, per-video enrichment was blocked for most videos, while the flat search and channel refresh always worked. Without a publish date a video still counts for tiers, views and topics, but not for age-based analysis (it shows "no date" instead of a score). Run from your own machine, or pass cookies, for fuller results. The YouTube Data API is not needed; if you use it instead, its `search.list` output ingests, but the query mapping is only recorded by `search`.
+
 ## Comments
 
 `spinwheel comments` runs yt-dlp for **long-form** videos with **more than** `--min-views` views (default 10,000; `--include-shorts` adds Shorts) and stores their top-level comments, most liked first (default 100 each, 25 videos per run, 3 s apart). It also fetches a few replies (default 150 per video, at most 3 per thread, `--replies 0` to skip) to see whether the channel answered a question. Videos fetched within `--refresh-days` (default 14) are skipped, and each fetch is stored as new snapshots, so like counts can be compared over time. `--dry-run` lists what it would fetch without touching the network. A video that fails (rate limit, "confirm you're not a bot") is reported and stores nothing; the rest continue, and the exit code is 1.

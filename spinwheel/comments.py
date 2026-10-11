@@ -58,24 +58,25 @@ def _is_short(conn: sqlite3.Connection, video_id: str, short_max: int) -> bool:
     return classify_format(snaps, short_max)[0] == "short"
 
 
-def command_for(video_id: str, max_comments: int, yt_dlp: str = "yt-dlp", replies: int = DEFAULT_REPLIES) -> list[str]:
+def command_for(video_id: str, max_comments: int, yt_dlp: str = "yt-dlp", replies: int = DEFAULT_REPLIES,
+                extra: list[str] | None = None) -> list[str]:
     # max_comments=<total>,<parents>,<replies>,<replies per thread>, most liked threads first. Replies are only
     # fetched to see whether the channel answered a question, so they are few per thread and capped overall.
     per = REPLIES_PER_THREAD if replies > 0 else 0
-    return [yt_dlp, "-J", "--skip-download", "--write-comments", "--extractor-args",
+    return [yt_dlp, "-J", "--skip-download", "--write-comments", *(extra or []), "--extractor-args",
             f"youtube:max_comments={max_comments + replies},{max_comments},{replies},{per};comment_sort=top",
             f"https://www.youtube.com/watch?v={video_id}"]
 
 
 def collect(conn: sqlite3.Connection, videos: list[dict], *, max_comments: int = 100, delay: float = 3.0,
-            replies: int = DEFAULT_REPLIES, yt_dlp: str = "yt-dlp", runner: Runner = run_command, sleep: Callable[[float], None] = time.sleep,
+            replies: int = DEFAULT_REPLIES, yt_dlp: str = "yt-dlp", extra: list[str] | None = None, runner: Runner = run_command, sleep: Callable[[float], None] = time.sleep,
             on_progress: Callable[[str], None] = lambda s: None) -> dict:
     """One failing video never stops the rest, and a failure stores nothing for that video."""
     stored, failed = {}, {}
     for i, v in enumerate(videos):
         if i:
             sleep(delay)
-        cmd = command_for(v["video_id"], max_comments, yt_dlp, replies)
+        cmd = command_for(v["video_id"], max_comments, yt_dlp, replies, extra)
         try:
             code, out, err = runner(cmd)
         except OSError as e:                     # yt-dlp not installed / not executable

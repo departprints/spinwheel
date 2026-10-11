@@ -148,6 +148,13 @@ def main(path):
                 ingest_text(conn, json.dumps(e), pulled_at=END + timedelta(hours=1),
                             command=shlex.join(comments_mod.command_for(v["id"], 100)) + " (synthetic)")
                 fetched += 1
+    # Topic discovery, as `spinwheel search` would store it: each topic's videos from every channel, in rank order.
+    for topic in TOPICS + EXCLUSIVE:
+        hits = sorted(((v, ch) for ch in chans for v in ch["vids"] if v["topic"] == topic and v["pub"] <= END),
+                      key=lambda vc: -views_at(vc[0], vc[1], END))
+        if hits:
+            ingest_text(conn, json.dumps({"_type": "playlist", "id": topic, "entries": [entry(v, ch, END) for v, ch in hits]}),
+                        pulled_at=END + timedelta(hours=2), command=f"yt-dlp -J ytsearch20:{topic} (synthetic)", search_query=topic)
     print(f"wrote {len(PULLS)} synthetic pulls x {len(chans)} channels + comments for {fetched} videos to {path}")
 
 

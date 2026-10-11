@@ -160,7 +160,8 @@ def _ytdlp(o: dict, parent: dict | None, out: "_Acc") -> None:
         width=_int(o.get("width")), height=_int(o.get("height")),
         page_url=_page_url(o),
     ))
-    if cid and o.get("channel_follower_count") is not None:
+    if cid and (o.get("channel_follower_count") is not None or o.get("channel") or o.get("uploader")):
+        # a video from a keyword search names its channel even when no subscriber count came with it
         out.channel(ChannelRec(cid, o.get("channel") or o.get("uploader"),
                                subscribers=_int(o.get("channel_follower_count"))))
 
