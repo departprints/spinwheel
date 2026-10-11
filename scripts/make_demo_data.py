@@ -32,11 +32,14 @@ HOOKS = [
 ]
 
 
-def make_channel(rng, cid, name, n_videos, subs0, scale):
+EXCLUSIVE = ["fermentation", "knife sharpening", "balcony garden"]   # only the small channel covers these
+
+
+def make_channel(rng, cid, name, n_videos, subs0, scale, extra_topics=()):
     vids = []
     for i in range(n_videos):
         pub = END - timedelta(days=rng.randint(3, 330), hours=rng.randint(0, 23))
-        topic, hook = rng.choice(TOPICS), rng.choice(HOOKS)
+        topic, hook = rng.choice(TOPICS + list(extra_topics)), rng.choice(HOOKS)
         title = hook.format(n=rng.choice([3, 5, 7, 9, 10]), t=topic)
         dur = rng.choice([45, 180, 360, 600, 720, 840, 1200, 2400])
         q = rng.lognormvariate(0, 0.55)
@@ -48,6 +51,8 @@ def make_channel(rng, cid, name, n_videos, subs0, scale):
             q *= 1.25
         if "30 days" in title or "setup tour" in title:
             q *= 0.7
+        if topic in EXCLUSIVE:
+            q *= 2.2          # planted: these topics do well, but only on the small channel
         vids.append(dict(id=f"{cid[-3:]}{i:07d}x"[:11].ljust(11, "x"), pub=pub, title=title, dur=dur,
                          q=q, topic=topic))
     return dict(cid=cid, name=name, vids=vids, subs0=subs0, scale=scale)
@@ -76,7 +81,7 @@ def main(path):
     chans = [make_channel(rng, "UCdemoMine0001", "Demo: Your Channel", 42, 8200, 30000),
              make_channel(rng, "UCdemoRival002", "Demo: Competitor A", 30, 61000, 160000),
              # small audience, big views: should be flagged as a channel outlier
-             make_channel(rng, "UCdemoSmall003", "Demo: Small Breakout", 24, 2100, 30000)]
+             make_channel(rng, "UCdemoSmall003", "Demo: Small Breakout", 30, 2100, 30000, EXCLUSIVE)]
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(path)
     for k, when in enumerate(PULLS):

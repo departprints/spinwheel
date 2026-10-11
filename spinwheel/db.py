@@ -6,6 +6,7 @@ Layout:
   videos, channels  identity only (id, first seen); everything descriptive lives in snapshots
   video_snapshots   one row per video per pull: title, views, likes, ... as of that pull
   channel_snapshots one row per channel per pull: subscribers, total views, ...
+  search_suggestions YouTube autocomplete results per fetch, so new phrases can be spotted over time
 
 Snapshot, payload and pull tables are protected by triggers that abort UPDATE and
 DELETE, so "not overwritten" is enforced by the database, not by convention.
@@ -72,10 +73,21 @@ CREATE TABLE IF NOT EXISTS video_snapshots (
     thumbnail_url TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_vsnap ON video_snapshots(video_id, captured_at);
+
+CREATE TABLE IF NOT EXISTS search_suggestions (
+    id          INTEGER PRIMARY KEY,
+    captured_at TEXT NOT NULL,
+    seed        TEXT NOT NULL,           -- the keyword the user asked about
+    query       TEXT NOT NULL,           -- what was actually typed (seed, or seed + a letter when expanding)
+    suggestion  TEXT NOT NULL,
+    rank        INTEGER NOT NULL         -- 0 = first suggestion; relevance order, NOT search volume
+);
+CREATE INDEX IF NOT EXISTS idx_sugg ON search_suggestions(seed, captured_at);
 """
 
 # Tables whose rows may never be modified or removed once written.
-_PROTECTED = ("pulls", "raw_payloads", "channel_snapshots", "video_snapshots", "videos", "channels")
+_PROTECTED = ("pulls", "raw_payloads", "channel_snapshots", "video_snapshots", "videos", "channels",
+              "search_suggestions")
 
 
 def _guards() -> str:

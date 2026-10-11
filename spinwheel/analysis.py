@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 from statistics import median
 from typing import Any
 
+from . import ideas as ideas_mod
+from . import topics as topics_mod
+
 MATURE_DAYS = 14
 MIN_GROUP = 3            # smallest group we'll draw a comparison from
 MIN_MATURE_FOR_PATTERNS = 8
@@ -29,11 +32,6 @@ DURATION_BUCKETS = [
     (480, 900, "8–15 min"), (900, 1800, "15–30 min"), (1800, float("inf"), "30+ min"),
 ]
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-_STOP = set("""a about after all also am an and any are as at be been being but by can could did do does
-doing for from get got had has have how i if in into is it its just like make me more most my no not of
-off on one or our out over so some than that the their them then there these they this to up us use
-using very was we were what when where which who why will with you your yours vs per new""".split())
 
 _QUESTION_START = re.compile(r"^(how|why|what|when|which|can|should|is|are|do|does|will)\b", re.I)
 
@@ -58,11 +56,6 @@ def _days(a: datetime, b: datetime) -> float:
 
 def _med(xs: list[float]) -> float | None:
     return median(xs) if xs else None
-
-
-def tokenize(title: str) -> set[str]:
-    words = re.findall(r"[a-z0-9']+", title.lower())
-    return {w.strip("'") for w in words if len(w) >= 3 and w not in _STOP and not w.isdigit()}
 
 
 def recent_rate(points: list[tuple[datetime, int]], window_days: float = 7) -> dict | None:
@@ -101,6 +94,14 @@ def _build_videos(v_rows) -> dict[str, dict]:
         pub = next((s["published_at"] for s in reversed(snaps) if s["published_at"]), None)
         cid = next((s["channel_id"] for s in reversed(snaps) if s["channel_id"]), None) or UNKNOWN_CHANNEL
         title = next((s["title"] for s in reversed(snaps) if s["title"]), vid)
+        tags = []
+        for s_ in reversed(snaps):
+            try:
+                tags = [t for t in json.loads(s_["tags"] or "[]") if isinstance(t, str)]
+            except (json.JSONDecodeError, TypeError):
+                tags = []
+            if tags:
+                break
         views, likes, comments = latest["view_count"], latest["like_count"], latest["comment_count"]
         t_cap = parse_ts(latest["captured_at"])
         pub_dt = parse_ts(pub) if pub else None
@@ -134,6 +135,7 @@ def _build_videos(v_rows) -> dict[str, dict]:
             "history": [[s["captured_at"], s["view_count"]] for s in counted],
             "title_changes": title_changes,
             "captured_at": latest["captured_at"],
+            "_phrases": topics_mod.phrases_for(title, tags),
             "thumb": next((s["thumbnail_url"] for s in reversed(snaps) if s["thumbnail_url"]), None),
         }
     return videos
@@ -201,21 +203,8 @@ def analyze_channel(vids: list[dict], subs: int | None = None) -> dict:
                          "median_with": mw, "median_without": mo,
                          "lift": _lift(mw, mo) if ok else None})
 
-    # keywords (words that always appear in exactly the same videos are merged into one entry)
-    kw: dict[str, list[dict]] = defaultdict(list)
-    for v in mature:
-        for w in tokenize(v["title"]):
-            kw[w].append(v)
-    merged: dict[frozenset, list[str]] = defaultdict(list)
-    for w, vs in kw.items():
-        if len(vs) >= 2:
-            merged[frozenset(v["id"] for v in vs)].append(w)
-    kws = []
-    for ids, words in merged.items():
-        vs = kw[words[0]]
-        m = _med([v["views"] for v in vs])
-        kws.append({"word": " + ".join(sorted(words)), "n": len(vs), "median_views": m, "lift": _lift(m, base)})
-    kws.sort(key=lambda k: (-(k["lift"] or 0), -k["n"], k["word"]))
+    # topics: phrases from titles and tags
+    topics_all = topics_mod.channel_topics(mature, base)
 
     # cadence: uploads per month for the last 12 months with data
     months: dict[str, int] = defaultdict(int)
@@ -230,14 +219,16 @@ def analyze_channel(vids: list[dict], subs: int | None = None) -> dict:
     changes = sorted((dict(c, video_id=v["id"], video=v["title"]) for v in vids for c in v["title_changes"]),
                      key=lambda c: c["at"], reverse=True)[:25]
 
-    findings = _findings(mature, base, durations, weekdays, features, kws, movers, vids, subs)
+    findings = _findings(mature, base, durations, weekdays, features, topics_all, movers, vids, subs)
 
     return {
         "videos": sorted(vids, key=lambda v: v["published"] or "", reverse=True),
         "median_views": base, "n_mature": len(mature),
         "median_engagement": _med([v["engagement"] for v in mature if v["engagement"] is not None]),
         "durations": durations, "weekdays": weekdays, "features": features,
-        "keywords_top": kws[:10], "keywords_bottom": [k for k in kws[::-1] if (k["lift"] or 0) < 1][:5],
+        "topics_top": topics_all[:topics_mod.TOP_SHOWN],
+        "topics_weak": [k for k in topics_all[::-1] if (k["lift"] or 0) < 1 and k["n"] >= MIN_GROUP][:5],
+        "topics_all": topics_all, "gaps": [], "ideas": [],
         "cadence": cadence, "movers": [v["id"] for v in movers], "title_changes": changes,
         "findings": findings,
     }
@@ -288,7 +279,7 @@ def _findings(mature, base, durations, weekdays, features, kws, movers, vids, su
         if kws and kws[0]["lift"] and kws[0]["lift"] >= 1.5:
             k = kws[0]
             out.append({"kind": "keyword", "text":
-                        f"Topic: videos with “{k['word']}” in the title have a median of {_fmt(k['median_views'])} views, "
+                        f"Topic: videos with “{k['phrase']}” in the title or tags have a median of {_fmt(k['median_views'])} views, "
                         f"{k['lift']:.1f}× the channel median (n={k['n']})."})
 
     # momentum: recent pace well above the video's own lifetime average
@@ -354,6 +345,19 @@ def build_dashboard_data(conn: sqlite3.Connection) -> dict:
         detail[cid] = a
 
     _compare_channel_sizes(channels, detail)
+    suggestions = _suggestions(conn)
+    titles = {c["id"]: c["title"] for c in channels}
+    for c in channels:
+        a = detail[c["id"]]
+        others = {oc: detail[oc]["videos"] for oc in detail if oc != c["id"]}
+        a["gaps"] = topics_mod.find_gaps(a["videos"], others, titles) if others else []
+        a["ideas"] = ideas_mod.build_ideas(channel=c, a=a, gaps=a["gaps"], suggestions=suggestions,
+                                           ref=ref, outlier_x=OUTLIER_X)
+        a["packaging"] = ideas_mod.packaging(a)
+        a["style"] = ideas_mod.style_titles(a["videos"])
+        del a["topics_all"]
+    for v in videos.values():              # internal helpers, not for the page
+        v.pop("_phrases", None)
     channels.sort(key=lambda c: (-c["n_videos"], c["title"]))
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -363,6 +367,7 @@ def build_dashboard_data(conn: sqlite3.Connection) -> dict:
         "mature_days": MATURE_DAYS, "min_group": MIN_GROUP, "outlier_x": OUTLIER_X,
         "min_channels": MIN_CHANNELS_TO_COMPARE,
         "channels": channels, "detail": detail, "breakouts": _breakouts(detail),
+        "suggestions": suggestions,
     }
 
 
@@ -384,6 +389,42 @@ def _compare_channel_sizes(channels: list[dict], detail: dict) -> None:
                 f"Channel outlier: a typical video here gets {c['views_per_sub']:.1f}× its {_fmt(c['subscribers'])} "
                 f"subscribers in views, {c['size_ratio']:.1f}× what the other tracked channels get. "
                 f"The channel as a whole is beating its size, so study its format and topics, not only its top video."})
+
+
+def _suggestions(conn: sqlite3.Connection) -> dict:
+    """seed -> {at, prev_at, items: [{text, rank, new}]} from the two most recent fetches of each seed.
+    `new` marks a phrase that wasn't suggested the time before. Order: the seed's own suggestions
+    first (autocomplete order), then phrases found by expanding with a letter."""
+    rows = conn.execute("SELECT captured_at, seed, query, suggestion, rank FROM search_suggestions "
+                        "ORDER BY captured_at, id").fetchall()
+    by_seed: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        by_seed[r["seed"]][r["captured_at"]].append(r)
+    out = {}
+    for seed, caps in by_seed.items():
+        times = sorted(caps)
+        latest = caps[times[-1]]
+        prev = {r["suggestion"] for r in caps[times[-2]]} if len(times) > 1 else None
+        seen, items = set(), []
+        for r in sorted(latest, key=lambda r: (r["query"] != seed, r["rank"])):
+            if r["suggestion"] not in seen:
+                seen.add(r["suggestion"])
+                items.append({"text": r["suggestion"], "rank": r["rank"],
+                              "new": prev is not None and r["suggestion"] not in prev})
+        out[seed] = {"at": times[-1], "prev_at": times[-2] if len(times) > 1 else None, "items": items}
+    return out
+
+
+def top_seeds(conn: sqlite3.Connection, n: int) -> list[str]:
+    """Phrases worth asking autocomplete about: the best topics and untested gaps across channels."""
+    data = build_dashboard_data(conn)
+    seeds: list[str] = []
+    for c in data["channels"]:
+        a = data["detail"][c["id"]]
+        for phrase in [g["phrase"] for g in a["gaps"]] + [t["phrase"] for t in a["topics_top"]]:
+            if len(phrase.split()) <= 3 and phrase not in seeds:
+                seeds.append(phrase)
+    return seeds[:n]
 
 
 def _breakouts(detail: dict) -> list[list[str]]:
