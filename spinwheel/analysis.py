@@ -18,6 +18,7 @@ from typing import Any
 
 from . import audience as audience_mod
 from . import ideas as ideas_mod
+from . import keywords as keywords_mod
 from . import topics as topics_mod
 
 MATURE_DAYS = 14
@@ -381,10 +382,11 @@ def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SE
     for vid, v in videos.items():
         v["has_comments"] = vid in comment_summaries
 
+    searches = _searches(conn)
     variants = {}
     for mode in FORMATS:
         subset = [dict(v) for v in videos.values() if mode == "all" or v["format"] == mode]
-        variants[mode] = _build_variant(mode, subset, channel_ids, ch_snaps, ref, suggestions, asks_by_video)
+        variants[mode] = _build_variant(mode, subset, channel_ids, ch_snaps, ref, suggestions, asks_by_video, searches)
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -393,7 +395,7 @@ def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SE
         "video_snapshots": len(v_rows), "channel_snapshots": len(c_rows),
         "mature_days": MATURE_DAYS, "min_group": MIN_GROUP, "outlier_x": OUTLIER_X,
         "min_channels": MIN_CHANNELS_TO_COMPARE,
-        "comment_min_views": 10_000, "short_max": short_max, "format_basis": dict(Counter(v["format_basis"] for v in videos.values())),
+        "keyword_min_titles": keywords_mod.MIN_TITLES, "comment_min_views": 10_000, "short_max": short_max, "format_basis": dict(Counter(v["format_basis"] for v in videos.values())),
         "formats": [{"id": m, "label": FORMAT_LABELS[m]} for m in FORMATS],
         "variants": variants, "history": history, "suggestions": suggestions, "comments": comment_summaries,
     }
@@ -411,8 +413,17 @@ def _latest_comments(conn: sqlite3.Connection) -> dict[str, list]:
     return out
 
 
+def _searches(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """topic -> the videos that keyword search ever surfaced, best rank first."""
+    out: dict[str, list[str]] = defaultdict(list)
+    for r in conn.execute("SELECT query, video_id, MIN(rank) AS r FROM searches GROUP BY query, video_id "
+                          "ORDER BY query, r"):
+        out[r["query"]].append(r["video_id"])
+    return dict(out)
+
+
 def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_snaps: dict, ref, suggestions: dict,
-                   asks_by_video: dict) -> dict:
+                   asks_by_video: dict, searches: dict) -> dict:
     by_channel: dict[str, list[dict]] = defaultdict(list)
     for v in subset:
         by_channel[v["channel_id"]].append(v)
@@ -475,10 +486,11 @@ def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_sna
         a["packaging"] = ideas_mod.packaging(a)
         a["style"] = ideas_mod.style_titles(a["videos"])
         del a["topics_all"]
+    topics_tracked = keywords_mod.tracked_topics({v["id"]: v for v in subset}, searches, suggestions, ref, parse_ts)
     for v in subset:                       # internal helpers, not for the page
         v.pop("_phrases", None)
     channels.sort(key=lambda c: (-c["n_videos"], c["title"]))
-    return {"channels": channels, "detail": detail, "breakouts": _breakouts(detail)}
+    return {"channels": channels, "detail": detail, "breakouts": _breakouts(detail), "topics": topics_tracked}
 
 
 def _compare_channel_sizes(channels: list[dict], detail: dict) -> None:

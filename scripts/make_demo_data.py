@@ -47,6 +47,9 @@ def make_channel(rng, cid, name, n_videos, subs0, scale, extra_topics=()):
         q = rng.lognormvariate(0, 0.55)
         if dur <= 60:
             q *= 2.5          # planted: Shorts get a different view scale than long-form
+        if topic == "cold plunge" and i % 2 == 0:   # planted: half of this topic's videos are brand new and fast (TRENDING)
+            pub = END - timedelta(days=(END - pub).days % 24 + 2, hours=pub.hour)
+            q *= 4
         if any(ch.isdigit() for ch in title):
             q *= 1.6
         if 480 <= dur < 900:

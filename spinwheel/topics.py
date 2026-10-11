@@ -47,6 +47,20 @@ def _edge_ok(w: str) -> bool:
     return _content(w) and w not in FORMAT
 
 
+def long_tail_phrases(title: str, n_max: int = 4) -> frozenset[str]:
+    """2-4 word phrases for keyword research. Unlike topic phrases these may start or end on a format word
+    ("budget travel tips", "cast iron tutorial" are exactly what people search), but never on a filler
+    word, and must contain at least one real subject word."""
+    ws = words(title)
+    out = set()
+    for n in range(2, n_max + 1):
+        for i in range(len(ws) - n + 1):
+            g = ws[i:i + n]
+            if _content(g[0]) and _content(g[-1]) and any(_edge_ok(w) for w in g):
+                out.add(" ".join(g))
+    return frozenset(out)
+
+
 def phrases_for(title: str, tags: list[str] | None = None) -> frozenset[str]:
     """1-3 word phrases from a title, plus whole tags. Phrases never start or end on a filler word."""
     ws = words(title)

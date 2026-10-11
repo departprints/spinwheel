@@ -76,6 +76,24 @@ Subscriber counts are also refreshed per channel (`spinwheel channels`, run auto
 
 Honest limits: in testing from a cloud server, per-video enrichment was blocked for most videos, while the flat search and channel refresh always worked. Without a publish date a video still counts for tiers, views and topics, but not for age-based analysis (it shows "no date" instead of a score). Run from your own machine, or pass cookies, for fuller results. The YouTube Data API is not needed; if you use it instead, its `search.list` output ingests, but the query mapping is only recorded by `search`.
 
+## Keyword research
+
+The **Keyword research** section starts with **Tracked topics**: every keyword you've searched with `spinwheel search`, with the videos that search surfaced. It follows the formulas of the [YouTube Outlier Finder](https://chadesheppard.com/videos/youtube-outlier-finder); the page leaves several terms undefined, so these are the choices made here:
+
+| Column / score | Definition |
+|---|---|
+| Videos (volume) | Distinct videos tracked for the topic. **Not search volume**, which no free data source gives. |
+| Gap score | average views ÷ number of channels covering the topic (as on the page). Topics with fewer than 3 videos sort last and are marked *thin*. |
+| Heat | **My definition.** TRENDING: 3+ videos in the last 30 days, at least 25% of the topic, and their median views/day at least 1.5× that of the older videos (which need 3+ too). ACTIVE: 2+ in the last 30 days. STEADY: otherwise. Blank without 5+ videos that have a publish date. |
+| Difficulty (0-100) | 65% log-scaled average subscribers of the channels in the phrase's videos + 35% log-scaled video volume (the number of videos) |
+| Opportunity (0-100) | 60% log-scaled average views + 40% views-per-subscriber |
+
+"Log-scaled" is undefined on the page; here it is `100 × log10(1 + x) ÷ log10(1 + cap)`, at most 100, with caps of 10M subscribers, 1M average views and 50 videos. Views-per-subscriber is the mean of views ÷ subscribers, with views equal to subscribers (the FIRE line) scoring 100. All of this is in `spinwheel/keywords.py`, marked CHOICE.
+
+Click a topic to see its **long-tail keywords**: phrases of 2-4 words found in at least 2 titles for that topic, ranked by highest opportunity, then lowest difficulty, alongside the topic's autocomplete suggestions (if fetched) and top videos. Long-tail phrases may start or end on format words ("budget travel tips", "cast iron tutorial"), since those are what people search; the channel-level topic list deliberately doesn't allow that.
+
+**Check a keyword** (the page's pre-script check): type a planned keyword and see every tracked video with it in the title, how many are FIRE / OUTLIER / HOT, and the best examples. No tiered video on an angle means it may be underserved, or that nobody wants it, so compare it with the autocomplete suggestions.
+
 ## Comments
 
 `spinwheel comments` runs yt-dlp for **long-form** videos with **more than** `--min-views` views (default 10,000; `--include-shorts` adds Shorts) and stores their top-level comments, most liked first (default 100 each, 25 videos per run, 3 s apart). It also fetches a few replies (default 150 per video, at most 3 per thread, `--replies 0` to skip) to see whether the channel answered a question. Videos fetched within `--refresh-days` (default 14) are skipped, and each fetch is stored as new snapshots, so like counts can be compared over time. `--dry-run` lists what it would fetch without touching the network. A video that fails (rate limit, "confirm you're not a bot") is reported and stores nothing; the rest continue, and the exit code is 1.
