@@ -14,9 +14,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+from .analysis import SHORT_MAX_SECONDS, classify_format
 from .ingest import ingest_text, utc_iso
 
 DEFAULT_MIN_VIEWS = 10_000
+DEFAULT_REPLIES = 150          # replies fetched per video in total (0 = none), at most REPLIES_PER_THREAD each
+REPLIES_PER_THREAD = 3
 Runner = Callable[[list[str]], tuple[int, str, str]]
 
 
@@ -26,9 +29,10 @@ def run_command(cmd: list[str]) -> tuple[int, str, str]:
 
 
 def eligible(conn: sqlite3.Connection, *, min_views: int = DEFAULT_MIN_VIEWS, refresh_days: float = 14,
-             limit: int | None = 25, now: datetime | None = None) -> list[dict]:
-    """Videos whose latest known view count is more than `min_views` and whose comments have not been
-    fetched in the last `refresh_days`, most-viewed first."""
+             limit: int | None = 25, now: datetime | None = None, include_shorts: bool = False,
+             short_max: int = SHORT_MAX_SECONDS) -> list[dict]:
+    """Long-form videos (Shorts too with include_shorts) whose latest known view count is more than
+    `min_views` and whose comments have not been fetched in the last `refresh_days`, most-viewed first."""
     now = now or datetime.now(timezone.utc)
     cutoff = utc_iso(now - timedelta(days=refresh_days))
     rows = conn.execute(
@@ -43,25 +47,35 @@ def eligible(conn: sqlite3.Connection, *, min_views: int = DEFAULT_MIN_VIEWS, re
         ORDER BY s.view_count DESC
         """, (min_views,)).fetchall()
     out = [dict(r) for r in rows if not r["last_fetch"] or r["last_fetch"] < cutoff]
+    if not include_shorts:
+        out = [r for r in out if not _is_short(conn, r["video_id"], short_max)]
     return out[:limit] if limit else out
 
 
-def command_for(video_id: str, max_comments: int, yt_dlp: str = "yt-dlp") -> list[str]:
-    # max_comments=<total>,<parents>,<replies>,<replies per thread>: top-level comments only, most liked first
+def _is_short(conn: sqlite3.Connection, video_id: str, short_max: int) -> bool:
+    snaps = conn.execute("SELECT duration_s, width, height, page_url FROM video_snapshots WHERE video_id = ? "
+                         "ORDER BY captured_at, id", (video_id,)).fetchall()
+    return classify_format(snaps, short_max)[0] == "short"
+
+
+def command_for(video_id: str, max_comments: int, yt_dlp: str = "yt-dlp", replies: int = DEFAULT_REPLIES) -> list[str]:
+    # max_comments=<total>,<parents>,<replies>,<replies per thread>, most liked threads first. Replies are only
+    # fetched to see whether the channel answered a question, so they are few per thread and capped overall.
+    per = REPLIES_PER_THREAD if replies > 0 else 0
     return [yt_dlp, "-J", "--skip-download", "--write-comments", "--extractor-args",
-            f"youtube:max_comments={max_comments},{max_comments},0,0;comment_sort=top",
+            f"youtube:max_comments={max_comments + replies},{max_comments},{replies},{per};comment_sort=top",
             f"https://www.youtube.com/watch?v={video_id}"]
 
 
 def collect(conn: sqlite3.Connection, videos: list[dict], *, max_comments: int = 100, delay: float = 3.0,
-            yt_dlp: str = "yt-dlp", runner: Runner = run_command, sleep: Callable[[float], None] = time.sleep,
+            replies: int = DEFAULT_REPLIES, yt_dlp: str = "yt-dlp", runner: Runner = run_command, sleep: Callable[[float], None] = time.sleep,
             on_progress: Callable[[str], None] = lambda s: None) -> dict:
     """One failing video never stops the rest, and a failure stores nothing for that video."""
     stored, failed = {}, {}
     for i, v in enumerate(videos):
         if i:
             sleep(delay)
-        cmd = command_for(v["video_id"], max_comments, yt_dlp)
+        cmd = command_for(v["video_id"], max_comments, yt_dlp, replies)
         try:
             code, out, err = runner(cmd)
         except OSError as e:                     # yt-dlp not installed / not executable

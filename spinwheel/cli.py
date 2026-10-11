@@ -69,19 +69,22 @@ def cmd_suggest(args) -> int:
 
 def cmd_comments(args) -> int:
     conn = db.connect(args.db)
-    videos = comments.eligible(conn, min_views=args.min_views, refresh_days=args.refresh_days, limit=args.max_videos)
+    videos = comments.eligible(conn, min_views=args.min_views, refresh_days=args.refresh_days, limit=args.max_videos,
+                               include_shorts=args.include_shorts)
+    kind = "video(s)" if args.include_shorts else "long-form video(s)"
     if not videos:
-        print(f"no videos over {args.min_views:,} views are waiting for a comment fetch "
+        print(f"no {kind} over {args.min_views:,} views are waiting for a comment fetch "
               f"(fetched within {args.refresh_days:g} days are skipped). Pull channels first, or lower --min-views.")
         return 0
-    print(f"{len(videos)} video(s) over {args.min_views:,} views, up to {args.max_comments} top-level comments each")
+    print(f"{len(videos)} {kind} over {args.min_views:,} views, up to {args.max_comments} top-level comments each"
+          + (f" plus up to {args.replies} replies (to see whether the channel answered)" if args.replies else ", no replies"))
     if args.dry_run:
         for v in videos:
             print(f"  {v['video_id']}  {v['views']:>12,} views  {v['title'] or ''}"[:120])
         print("dry run: nothing fetched")
         return 0
-    r = comments.collect(conn, videos, max_comments=args.max_comments, delay=args.delay, yt_dlp=args.yt_dlp,
-                         on_progress=print)
+    r = comments.collect(conn, videos, max_comments=args.max_comments, delay=args.delay, replies=args.replies,
+                         yt_dlp=args.yt_dlp, on_progress=print)
     total = sum(r["stored"].values())
     print(f"stored {total} comment(s) from {len(r['stored'])} video(s); {len(r['failed'])} failed")
     for vid, err in r["failed"].items():
@@ -136,6 +139,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("comments", help="fetch top comments (via yt-dlp) for videos over a view threshold")
     p.add_argument("--min-views", type=int, default=comments.DEFAULT_MIN_VIEWS, help="only videos with MORE views than this (default 10000)")
     p.add_argument("--max-comments", type=int, default=100, help="top-level comments per video, most liked first (default 100)")
+    p.add_argument("--replies", type=int, default=comments.DEFAULT_REPLIES, help="replies to fetch per video in total, at most 3 per thread, "
+                   "used to tell whether the channel answered a question (default 150; 0 = none, answers then unknown)")
+    p.add_argument("--include-shorts", action="store_true", help="also fetch comments for Shorts (default: long-form only)")
     p.add_argument("--max-videos", type=int, default=25, help="videos per run, most viewed first (default 25)")
     p.add_argument("--refresh-days", type=float, default=14, help="skip videos fetched within this many days (default 14)")
     p.add_argument("--delay", type=float, default=3.0, help="seconds between videos (default 3)")

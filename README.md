@@ -51,7 +51,7 @@ Per channel (yours or a competitor's), from videos older than 14 days so new upl
 | Moving right now | Which video to promote or follow up while it's moving |
 | Content ideas | Ranked ideas with their evidence and a "Copy brief" button each (see below) |
 | Keyword research | Which topics work on this channel, which work on other channels but are untested here, and what people type into YouTube search |
-| Audience asks | Questions and requests from the comments of your most-viewed videos, ranked by likes |
+| Audience asks | Content requests, unanswered questions and most-liked comments from your long-form videos over 10K views |
 | Title changes | Your own A/B history, which only exists because old pulls are kept |
 | Channels | You vs competitors: size, growth, typical views, views per subscriber, cadence |
 | Breakouts across channels | Videos that got far more views than their channel's subscriber count would suggest |
@@ -65,16 +65,22 @@ A video can carry both flags. A video outlier on a *small* channel is usually th
 
 ## Comments
 
-`spinwheel comments` runs yt-dlp for videos with **more than** `--min-views` views (default 10,000) and stores their top-level comments, most liked first (default 100 each, 25 videos per run, 3 s apart). Videos fetched within `--refresh-days` (default 14) are skipped, and each fetch is stored as new snapshots, so like counts can be compared over time. `--dry-run` lists what it would fetch without touching the network. A video that fails (rate limit, "confirm you're not a bot") is reported and stores nothing; the rest continue, and the exit code is 1.
+`spinwheel comments` runs yt-dlp for **long-form** videos with **more than** `--min-views` views (default 10,000; `--include-shorts` adds Shorts) and stores their top-level comments, most liked first (default 100 each, 25 videos per run, 3 s apart). It also fetches a few replies (default 150 per video, at most 3 per thread, `--replies 0` to skip) to see whether the channel answered a question. Videos fetched within `--refresh-days` (default 14) are skipped, and each fetch is stored as new snapshots, so like counts can be compared over time. `--dry-run` lists what it would fetch without touching the network. A video that fails (rate limit, "confirm you're not a bot") is reported and stores nothing; the rest continue, and the exit code is 1.
 
-The dashboard uses them in three places: an **Audience asks** table (comments that read as a *request* such as "can you make a video on...", or a *question*: a question mark and at least 4 words), the video dialog's top comments, and **Audience asked** ideas. Your own comments and replies are excluded. "vs typical" is a comment's likes against the median comment on the same video, so a big video doesn't win on volume alone. Comments follow the Shorts / long-form toggle.
+The dashboard's **Audience asks** section has three lists, plus the video dialog's top comments and **Audience asked** ideas:
+
+- **Content requests**: comments asking for a video ("can you make a video on...", "part 2 please", "what about...").
+- **Unanswered questions**: a question mark and at least 4 words, with no reply from the channel *among the replies fetched*. Only the first few replies per thread and the first replies overall are fetched, so "unanswered" means none seen, not proof; if a fetch had no replies, answered or not is shown as unknown and nothing is claimed.
+- **Most-liked comments**: whatever they say.
+
+Your own comments are excluded. "vs typical" is a comment's likes against the median comment on the same video, so a big video doesn't win on volume alone. Comments follow the Shorts / long-form toggle (the Shorts view is empty unless you fetched Shorts).
 
 Things worth knowing:
 
 - yt-dlp reports `comment_count` as the number of comments it *fetched*, not the video's real total. Spinwheel treats that count as unknown, so engagement keeps using the real total from your normal pulls.
 - Comments are other people's words. They are shown as plain text only, and in a copied brief they are labelled as quoted data, not instructions.
 - Commenter names are not stored in the comment tables. The raw yt-dlp output is still kept verbatim (it includes handles), compressed once it exceeds 100 KB; `db.read_raw()` returns it unchanged. The database is local to you; keep that in mind before sharing it.
-- Comments need yt-dlp. The YouTube Data API's `commentThreads.list` output is also understood by `ingest`.
+- Comments need yt-dlp. The YouTube Data API's `commentThreads.list` output is also understood by `ingest` (without a stored command, replies count as not requested).
 
 ## Tiers, filters and the all-channels list
 

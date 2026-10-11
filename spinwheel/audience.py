@@ -1,7 +1,7 @@
 """What the audience is asking for, from stored comments.
 
-Only top-level comments from the latest fetch of each video are used, and the channel's own comments
-are ignored. A comment is a *request* ("can you make a video on ...", "part 2 please") or a *question*
+Only top-level comments from the latest fetch of each video are asked about, and the channel's own comments
+are ignored (its replies are used only to tell whether a question was answered). A comment is a *request* ("can you make a video on ...", "part 2 please") or a *question*
 (has a question mark and at least 4 words). Ranking is by likes, and `heat` says how far a comment
 stands out from the typical comment under the same video (likes ÷ that video's median likes), so a
 comment on a huge video doesn't outrank a better one on a small video just by volume.
@@ -47,9 +47,24 @@ def _key(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()[:60]
 
 
-def analyze_video(rows: list) -> dict:
-    """rows: the latest fetch's comment rows for one video (sqlite rows or dicts)."""
+_ARGS = re.compile(r"max_comments=\d+,\d+,(\d+),\d+")
+
+
+def replies_requested(command: str | None) -> bool:
+    """Was this comment fetch run with replies on? Read from the stored yt-dlp command. Anything else
+    (an API response, a file) is unknown, and 'unanswered' is then not claimed."""
+    m = _ARGS.search(command or "")
+    return bool(m and int(m.group(1)) > 0)
+
+
+def analyze_video(rows: list, replies_known: bool = False) -> dict:
+    """rows: the latest fetch's comment rows for one video (sqlite rows or dicts).
+
+    A question counts as answered when the channel wrote one of the replies that were fetched for its
+    thread. Only a few replies per thread are fetched, so `answered: False` means "no reply from the
+    channel seen", not proof that it was never answered. Without replies in the fetch it is None."""
     top = [r for r in rows if r["parent_id"] is None and not r["by_creator"]]
+    creator_replied = {r["parent_id"] for r in rows if r["parent_id"] is not None and r["by_creator"]}
     likes = [r["like_count"] or 0 for r in top]
     typical = max(median(likes), 1) if likes else 1
     asks, seen = [], set()
@@ -60,19 +75,23 @@ def analyze_video(rows: list) -> dict:
             continue
         seen.add(k)
         asks.append({"kind": kind, "text": _clean(r["text"]), "likes": r["like_count"] or 0,
-                     "heat": (r["like_count"] or 0) / typical, "video_id": r["video_id"]})
-    best = sorted(top, key=lambda r: -(r["like_count"] or 0))[:5]
+                     "heat": (r["like_count"] or 0) / typical, "video_id": r["video_id"],
+                     "answered": (r["comment_id"] in creator_replied) if (replies_known and kind == "question") else None})
+    best = sorted(top, key=lambda r: -(r["like_count"] or 0))
     return {
         "summary": {"at": max((r["captured_at"] for r in rows), default=None)[:10] if rows else None,
-                    "n": len(top), "asks": len(asks),
+                    "n": len(top), "asks": len(asks), "replies_known": replies_known,
+                    "replies": sum(1 for r in rows if r["parent_id"] is not None),
                     "top": [{"text": _clean(r["text"], 400), "likes": r["like_count"] or 0, "kind": classify(r["text"])}
-                            for r in best]},
+                            for r in best[:5]]},
         "asks": asks,
+        "liked": [{"kind": classify(r["text"]), "text": _clean(r["text"]), "likes": r["like_count"] or 0,
+                   "heat": (r["like_count"] or 0) / typical, "video_id": r["video_id"], "answered": None} for r in best[:10]],
     }
 
 
 def merge_asks(per_video: list[list[dict]], limit: int = 12) -> list[dict]:
-    """Best asks across videos by likes, dropping near-identical wording."""
+    """Best items across videos by likes, dropping near-identical wording."""
     flat = sorted((a for asks in per_video for a in asks), key=lambda a: -a["likes"])
     out, seen = [], set()
     for a in flat:

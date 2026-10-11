@@ -375,8 +375,9 @@ def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SE
 
     comment_summaries, asks_by_video = {}, {}
     for vid, rows in _latest_comments(conn).items():
-        r = audience_mod.analyze_video(rows)
-        comment_summaries[vid], asks_by_video[vid] = r["summary"], r["asks"]
+        r = audience_mod.analyze_video(rows, audience_mod.replies_requested(rows[0]["command"]))
+        comment_summaries[vid] = r["summary"]
+        asks_by_video[vid] = {"asks": r["asks"], "liked": r["liked"]}
     for vid, v in videos.items():
         v["has_comments"] = vid in comment_summaries
 
@@ -401,8 +402,9 @@ def build_dashboard_data(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SE
 def _latest_comments(conn: sqlite3.Connection) -> dict[str, list]:
     """video_id -> the rows of its most recent comment fetch."""
     rows = conn.execute(
-        "SELECT c.* FROM comment_snapshots c JOIN (SELECT video_id, MAX(captured_at) AS m FROM comment_snapshots "
-        "GROUP BY video_id) l ON c.video_id = l.video_id AND c.captured_at = l.m").fetchall()
+        "SELECT c.*, p.command FROM comment_snapshots c JOIN pulls p ON p.id = c.pull_id "
+        "JOIN (SELECT video_id, MAX(captured_at) AS m FROM comment_snapshots GROUP BY video_id) l "
+        "ON c.video_id = l.video_id AND c.captured_at = l.m").fetchall()
     out: dict[str, list] = defaultdict(list)
     for r in rows:
         out[r["video_id"]].append(r)
@@ -459,7 +461,14 @@ def _build_variant(mode: str, subset: list[dict], channel_ids: list[str], ch_sna
         others = {oc: detail[oc]["videos"] for oc in detail if oc != c["id"]}
         a["gaps"] = topics_mod.find_gaps(a["videos"], others, titles) if others else []
         with_comments = [v for v in a["videos"] if v["has_comments"]]
-        a["asks"] = audience_mod.merge_asks([asks_by_video[v["id"]] for v in with_comments])
+        per = [asks_by_video[v["id"]] for v in with_comments]
+        a["asks"] = audience_mod.merge_asks([p["asks"] for p in per])
+        a["requests"] = audience_mod.merge_asks([[x for x in p["asks"] if x["kind"] == "request"] for p in per])
+        questions = [x for p in per for x in p["asks"] if x["kind"] == "question"]
+        a["unanswered"] = audience_mod.merge_asks([[x for x in questions if x["answered"] is False]])
+        a["questions_answered"] = sum(1 for x in questions if x["answered"] is True)
+        a["questions_unknown"] = sum(1 for x in questions if x["answered"] is None)
+        a["top_liked"] = audience_mod.merge_asks([p["liked"] for p in per])
         a["comment_videos"] = len(with_comments)
         a["ideas"] = ideas_mod.build_ideas(channel=c, a=a, gaps=a["gaps"], suggestions=suggestions,
                                            ref=ref, outlier_x=OUTLIER_X)

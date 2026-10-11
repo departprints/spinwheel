@@ -11,11 +11,13 @@ Three made-up channels, weekly pulls over six weeks, a few planted patterns (num
 import json
 import math
 import random
+import shlex
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from spinwheel import comments as comments_mod  # noqa: E402
 from spinwheel import db                      # noqa: E402
 from spinwheel.ingest import ingest_text      # noqa: E402
 
@@ -105,10 +107,19 @@ def fake_comments(rng, v, views):
         out.append({"id": f"Ug{v['id']}{i:03d}", "parent": "root", "text": text, "like_count": likes,
                     "author": "@demo-viewer", "author_is_uploader": False, "is_pinned": False,
                     "timestamp": int((END - timedelta(days=rng.randint(1, 60))).timestamp())})
+    # replies, as fetched with a few per thread: the channel answers about half of the questions
+    for c in list(out):
+        if c["text"] in [q.format(topic=v["topic"]) for q in QUESTIONS] and rng.random() < 0.5:
+            out.append({"id": f"{c['id']}.r1", "parent": c["id"], "text": "Good question! I cover that in the description.",
+                        "like_count": rng.randint(0, 20), "author": "@demo-channel", "author_is_uploader": True,
+                        "is_pinned": False, "timestamp": int(END.timestamp())})
+        elif rng.random() < 0.3:
+            out.append({"id": f"{c['id']}.r2", "parent": c["id"], "text": "same here", "like_count": rng.randint(0, 5),
+                        "author": "@demo-viewer", "author_is_uploader": False, "is_pinned": False, "timestamp": int(END.timestamp())})
     out.append({"id": f"Ug{v['id']}own", "parent": "root", "text": "Thanks for watching! Can you tell me what to cover next?",
                 "like_count": 40, "author": "@demo-channel", "author_is_uploader": True, "is_pinned": True,
                 "timestamp": int(END.timestamp())})       # the channel's own comment: must be ignored
-    return sorted(out, key=lambda c: -c["like_count"])
+    return sorted(out, key=lambda c: (c["parent"] != "root", -c["like_count"]))
 
 
 def main(path):
@@ -132,10 +143,10 @@ def main(path):
     for ch in chans:
         for v in ch["vids"]:
             e = entry(v, ch, END)
-            if v["pub"] <= END and e["view_count"] > 10_000 and rc.random() < 0.6:
+            if v["pub"] <= END and v["dur"] > 60 and e["view_count"] > 10_000 and rc.random() < 0.6:   # long-form only
                 e["comments"] = fake_comments(rc, v, e["view_count"])
                 ingest_text(conn, json.dumps(e), pulled_at=END + timedelta(hours=1),
-                            command=f"yt-dlp -J --skip-download --write-comments https://www.youtube.com/watch?v={v['id']} (synthetic)")
+                            command=shlex.join(comments_mod.command_for(v["id"], 100)) + " (synthetic)")
                 fetched += 1
     print(f"wrote {len(PULLS)} synthetic pulls x {len(chans)} channels + comments for {fetched} videos to {path}")
 

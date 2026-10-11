@@ -204,10 +204,11 @@ class Collect(unittest.TestCase):
         self.assertEqual(naps, [2, 2])
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM comment_snapshots WHERE video_id='vid00000002'").fetchone()[0], 0)
 
-    def test_command_asks_for_top_level_comments_most_liked_first(self):
+    def test_command_asks_for_the_most_liked_threads_with_a_few_replies(self):
         cmd = comments.command_for("abc", 40)
-        arg = cmd[cmd.index("--extractor-args") + 1]
-        self.assertEqual(arg, "youtube:max_comments=40,40,0,0;comment_sort=top")
+        arg = lambda c: c[c.index("--extractor-args") + 1]
+        self.assertEqual(arg(cmd), "youtube:max_comments=190,40,150,3;comment_sort=top")   # total, parents, replies, per thread
+        self.assertEqual(arg(comments.command_for("abc", 40, replies=0)), "youtube:max_comments=40,40,0,0;comment_sort=top")
         self.assertIn("--skip-download", cmd)
 
     def test_missing_ytdlp_stops_cleanly_with_the_reason(self):
@@ -224,6 +225,71 @@ class Collect(unittest.TestCase):
         seed(conn, {"vid00000001": 30_000})
         r = comments.collect(conn, comments.eligible(conn, now=NOW), runner=lambda c: (0, "not json", ""), sleep=lambda s: None)
         self.assertEqual(list(r["failed"]), ["vid00000001"])
+
+
+class LongFormOnly(unittest.TestCase):
+    def test_shorts_are_skipped_unless_asked_for(self):
+        conn = mem()
+        ingest_text(conn, json.dumps(video("vid0000long", 50_000)), pulled_at="2026-09-01T00:00:00Z")
+        ingest_text(conn, json.dumps(video("vid000short", 90_000, width=1080, height=1920, duration=30)), pulled_at="2026-09-01T00:00:00Z")
+        ingest_text(conn, json.dumps(video("vid000url", 80_000, webpage_url="https://www.youtube.com/shorts/vid000url")), pulled_at="2026-09-01T00:00:00Z")
+        ids = lambda **kw: [v["video_id"] for v in comments.eligible(conn, now=NOW, **kw)]
+        self.assertEqual(ids(), ["vid0000long"])
+        self.assertEqual(ids(include_shorts=True), ["vid000short", "vid000url", "vid0000long"])
+
+    def test_the_limit_counts_long_form_videos_only(self):
+        conn = mem()
+        for i in range(3):
+            ingest_text(conn, json.dumps(video(f"vid00short{i}", 90_000 + i, width=1080, height=1920, duration=30)), pulled_at="2026-09-01T00:00:00Z")
+        ingest_text(conn, json.dumps(video("vid0000long", 20_000)), pulled_at="2026-09-01T00:00:00Z")
+        self.assertEqual([v["video_id"] for v in comments.eligible(conn, now=NOW, limit=1)], ["vid0000long"])
+
+
+def reply(i, parent, text, by_creator=False, likes=0):
+    return real_shape_comment(i, text, likes, parent=parent, author_is_uploader=by_creator)
+
+
+class Answered(unittest.TestCase):
+    Q = "How much did the whole setup cost in total?"
+
+    def rows(self, comment_list, command):
+        conn = mem()
+        ingest_text(conn, json.dumps(video("vid00000001", 50_000, comment_list)), pulled_at="2026-09-02T00:00:00Z", command=command)
+        return conn
+
+    def test_replies_requested_is_read_from_the_stored_command(self):
+        yes = " ".join(comments.command_for("abc", 100))
+        self.assertTrue(audience.replies_requested(yes))
+        self.assertFalse(audience.replies_requested(" ".join(comments.command_for("abc", 100, replies=0))))
+        self.assertFalse(audience.replies_requested("ingest some-file.json"))
+        self.assertFalse(audience.replies_requested(None))
+
+    def test_question_with_a_creator_reply_is_answered_and_without_is_unanswered(self):
+        cs = [real_shape_comment(1, self.Q, 50), real_shape_comment(2, "What camera do you use for this kind of video?", 40),
+              reply(3, "UgFAKE001", "Around $400, details in the description", by_creator=True),
+              reply(4, "UgFAKE002", "same question here", by_creator=False)]
+        conn = self.rows(cs, " ".join(comments.command_for("vid00000001", 100)))
+        a = analysis.build_dashboard_data(conn)["variants"]["all"]["detail"]["UCx"]
+        self.assertEqual([x["text"] for x in a["unanswered"]], ["What camera do you use for this kind of video?"])   # a fan reply is not an answer
+        self.assertEqual((a["questions_answered"], a["questions_unknown"]), (1, 0))
+
+    def test_without_replies_in_the_fetch_nothing_is_claimed_unanswered(self):
+        conn = self.rows([real_shape_comment(1, self.Q, 50)], " ".join(comments.command_for("vid00000001", 100, replies=0)))
+        a = analysis.build_dashboard_data(conn)["variants"]["all"]["detail"]["UCx"]
+        self.assertEqual((a["unanswered"], a["questions_unknown"]), ([], 1))
+
+    def test_requests_are_their_own_list_and_never_marked_answered(self):
+        cs = [real_shape_comment(1, "Can you make a video on cast iron skillets?", 70), real_shape_comment(2, self.Q, 40),
+              reply(3, "UgFAKE001", "good idea!", by_creator=True)]
+        a = analysis.build_dashboard_data(self.rows(cs, " ".join(comments.command_for("vid00000001", 100))))["variants"]["all"]["detail"]["UCx"]
+        self.assertEqual([x["kind"] for x in a["requests"]], ["request"])
+        self.assertIsNone(a["requests"][0]["answered"])
+
+    def test_most_liked_list_ignores_the_creator_and_replies_and_ranks_by_likes(self):
+        cs = [real_shape_comment(1, "love it", 5), real_shape_comment(2, "best video ever", 90), real_shape_comment(3, "creator note", 999, author_is_uploader=True),
+              reply(4, "UgFAKE001", "reply with many likes", likes=500)]
+        a = analysis.build_dashboard_data(self.rows(cs, "x"))["variants"]["all"]["detail"]["UCx"]
+        self.assertEqual([x["text"] for x in a["top_liked"]], ["best video ever", "love it"])
 
 
 class Audience(unittest.TestCase):
