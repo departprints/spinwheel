@@ -1,6 +1,7 @@
 """Turn the JSON a YouTube CLI prints into normalized records.
 
-Supported shapes (auto-detected, mixable in one file / stream):
+Supported shapes (auto-detected, mixable in one file / stream; any of them may be wrapped in
+youtube-pp-cli's {"meta": ..., "results": ...} envelope):
   * yt-dlp:   `yt-dlp -J URL`, `--dump-json URL` (one JSON object per line), channel or
               playlist dumps with an `entries` list, flat or full.
   * YouTube Data API v3: any `videos.list`, `channels.list`, `search.list` or
@@ -286,26 +287,40 @@ def _json_objects(text: str) -> Iterator[Any]:
             raise ValueError(f"input is neither one JSON document nor JSON lines (line {n}: {e.msg})") from None
 
 
+def _is_envelope(o: dict) -> bool:
+    """youtube-pp-cli --agent wraps its data: {"meta": {"source": "live"|"local", ...}, "results": <data>}."""
+    return isinstance(o.get("meta"), dict) and "results" in o and "items" not in o and "id" not in o
+
+
+def _dispatch(o: Any, acc: "_Acc", depth: int = 0) -> None:
+    if isinstance(o, list):
+        for x in o:
+            _dispatch(x, acc, depth)
+    elif not isinstance(o, dict):
+        acc.skipped += 1
+    elif _is_envelope(o) and depth < 3:
+        _dispatch(o["results"], acc, depth + 1)
+    elif isinstance(o.get("items"), list) and (str(o.get("kind", "")).startswith("youtube#") or "etag" in o):
+        acc.sources.add("youtube-api")
+        for it in o["items"]:
+            if isinstance(it, dict):
+                _api_item(it, acc)
+            else:
+                acc.skipped += 1
+    elif str(o.get("kind", "")).startswith("youtube#") or (
+            ("snippet" in o or "statistics" in o) and "id" in o and "entries" not in o):
+        # a typed item, or a bare Data API item (as in an envelope's `results` list) with no `kind`
+        acc.sources.add("youtube-api")
+        _api_item(o, acc)
+    else:
+        acc.sources.add("yt-dlp")
+        _ytdlp(o, None, acc)
+
+
 def parse(text: str) -> Parsed:
     acc = _Acc()
     for obj in _json_objects(text):
-        for o in obj if isinstance(obj, list) else [obj]:
-            if not isinstance(o, dict):
-                acc.skipped += 1
-            elif isinstance(o.get("items"), list) and (
-                    str(o.get("kind", "")).startswith("youtube#") or "etag" in o):
-                acc.sources.add("youtube-api")
-                for it in o["items"]:
-                    if isinstance(it, dict):
-                        _api_item(it, acc)
-                    else:
-                        acc.skipped += 1
-            elif str(o.get("kind", "")).startswith("youtube#"):
-                acc.sources.add("youtube-api")
-                _api_item(o, acc)
-            else:
-                acc.sources.add("yt-dlp")
-                _ytdlp(o, None, acc)
+        _dispatch(obj, acc)
     source = "mixed" if len(acc.sources) > 1 else (next(iter(acc.sources), "unknown"))
     return Parsed(source, list(acc._videos.values()), list(acc._channels.values()), acc.skipped,
                   list(acc._comments.values()))

@@ -73,6 +73,47 @@ class Parsing(unittest.TestCase):
         self.assertEqual((by["C1.r"].parent_id, by["C1.r"].by_creator), ("C1", True))
 
 
+API_VIDEO_RESPONSE = {"kind": "youtube#videoListResponse", "etag": "e", "items": [{
+    "kind": "youtube#video", "id": "vid00000001",
+    "snippet": {"publishedAt": "2025-01-01T00:00:00Z", "channelId": "UC1", "title": "t"},
+    "contentDetails": {"duration": "PT10M"}, "statistics": {"viewCount": "123", "likeCount": "4", "commentCount": "5"}}]}
+
+
+class Envelope(unittest.TestCase):
+    """youtube-pp-cli --agent prints {"meta": {...}, "results": <data>}."""
+    META = {"source": "live", "synced_at": "2026-10-11T00:00:00Z"}
+
+    def test_wrapped_raw_api_response(self):
+        p = parse(json.dumps({"meta": self.META, "results": API_VIDEO_RESPONSE}))
+        self.assertEqual((p.source, p.videos[0].video_id, p.videos[0].view_count), ("youtube-api", "vid00000001", 123))
+
+    def test_wrapped_list_of_bare_items_without_kind(self):
+        bare = {k: v for k, v in API_VIDEO_RESPONSE["items"][0].items() if k != "kind"}
+        p = parse(json.dumps({"meta": self.META, "results": [bare]}))
+        self.assertEqual((p.videos[0].view_count, p.videos[0].duration_s), (123, 600))
+
+    def test_wrapped_channel_and_comment_threads(self):
+        ch = {"kind": "youtube#channelListResponse", "items": [{"kind": "youtube#channel", "id": "UC1", "snippet": {"title": "C"},
+              "statistics": {"subscriberCount": "777", "viewCount": "9", "videoCount": "3"}}]}
+        self.assertEqual(parse(json.dumps({"meta": self.META, "results": ch})).channels[0].subscribers, 777)
+        th = {"kind": "youtube#commentThreadListResponse", "items": [{"kind": "youtube#commentThread", "id": "T",
+              "snippet": {"videoId": "vid00000001", "channelId": "UC1", "topLevelComment": {"id": "C1", "snippet": {"textOriginal": "hi?", "likeCount": 2}}}}]}
+        self.assertEqual(parse(json.dumps({"meta": self.META, "results": th})).comments[0].comment_id, "C1")
+
+    def test_wrapped_ytdlp_style_object_and_double_wrap(self):
+        inner = {"meta": self.META, "results": video()}
+        self.assertEqual(parse(json.dumps({"meta": self.META, "results": inner})).videos[0].view_count, 50_000)
+
+    def test_envelope_with_nothing_inside_is_rejected_not_stored(self):
+        conn = mem()
+        with self.assertRaises(ValueError):
+            ingest_text(conn, json.dumps({"meta": self.META, "results": []}))
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM pulls").fetchone()[0], 0)
+
+    def test_a_yt_dlp_video_with_a_meta_key_is_not_mistaken_for_an_envelope(self):
+        self.assertEqual(parse(json.dumps(dict(video(), meta={"x": 1}))).videos[0].video_id, "vid00000001")
+
+
 class Storage(unittest.TestCase):
     def test_large_payloads_are_compressed_and_read_back_verbatim(self):
         conn = mem()
