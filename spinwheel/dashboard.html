@@ -553,7 +553,9 @@ function render() {
 }
 
 // Today ----------------------------------------------------------------
-let todayWindow = '1', todayTier = 'hot', todayFace = null, todayMin = '1000';
+let todayWindow = '1', todayTier = 'hot', todayFace = null, todayMin = '1000', todaySubs = '100';
+const MIN_SUB_OPTIONS = [['0', 'Any channel size'], ['50', '50+ subscribers'], ['100', '100+ subscribers'], ['500', '500+ subscribers'], ['1000', '1,000+ subscribers']];
+const exactAgeHours = (v) => (v.published && v.published.length > 10 && v.age_max_days != null ? v.age_max_days * 24 : null);
 const MIN_VIEW_OPTIONS = [['0', 'Any number of views'], ['100', '100+ views'], ['1000', '1,000+ views'], ['5000', '5,000+ views'], ['10000', '10,000+ views']];
 const FACE_OPTIONS = [['all', 'All channels'], ['faceless', 'Verified faceless only'], ['unreviewed', 'Not reviewed yet'], ['noface', 'Hide channels that show a face']];
 const TODAY_WINDOWS = [['1', 'Last 24 hours', 1], ['3', 'Last 3 days', 3], ['7', 'Last 7 days', 7]];
@@ -567,6 +569,7 @@ function pageToday(root) {
   const tierSel = sel('Tier', TIER_OPTIONS, todayTier, (v) => { todayTier = v; });
   const faceSel = sel('Faceless', FACE_OPTIONS, todayFace, (v) => { todayFace = v; });
   const minSel = sel('Minimum views', MIN_VIEW_OPTIONS, todayMin, (v) => { todayMin = v; });
+  const subSel = sel('Minimum subscribers', MIN_SUB_OPTIONS, todaySubs, (v) => { todaySubs = v; });
   const sort = { key: 'views_per_sub', dir: -1 };
   const cols = [
     ['title', 'Video', (v) => v.title, false, (v) => { const img = safeImg(v.thumb), im = img ? h('img', { src: img, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' }) : null; if (im) im.addEventListener('error', () => im.remove());
@@ -576,6 +579,9 @@ function pageToday(root) {
     ['views', 'Views', (v) => v.views, true, (v) => h('td', { class: 'n' }, fmt(v.views))],
     ['views_per_sub', 'Views ÷ subs', (v) => v.views_per_sub, true, (v) => h('td', { class: 'n' }, times(v.views_per_sub))],
     ['tier', 'Tier', tierRank, true, (v) => h('td', { class: 'n' }, tierChip(v))],
+    ['age', 'Age', exactAgeHours, true, (v) => { const a = exactAgeHours(v); return h('td', { class: 'n', title: a == null ? 'Published within the search window; exact time unknown' : null }, a == null ? '< 24h' : a < 1 ? '< 1h' : Math.round(a) + 'h'); }],
+    ['vph', 'Views / hour', (v) => { const a = exactAgeHours(v); return a == null ? null : (v.views || 0) / Math.max(a, 1); }, true, (v) => { const a = exactAgeHours(v); return h('td', { class: 'n' }, a == null ? '—' : fmt((v.views || 0) / Math.max(a, 1))); }],
+    ['type', 'Type', (v) => v.format, false, (v) => h('td', {}, v.format === 'short' ? 'Short' : 'Long')],
     ['duration_s', 'Length', (v) => v.duration_s, true, (v) => h('td', { class: 'n' }, dur(v.duration_s))],
     ['found', 'Found under', (v) => (v.found_under || []).join(', '), false, (v) => h('td', { class: 'note' }, (v.found_under || []).join(', '))],
   ];
@@ -591,7 +597,8 @@ function pageToday(root) {
     const faceOk = (v) => { const l = labelOf(v.channel_id); const lab = l ? l.label : null;
       return todayFace === 'all' || (todayFace === 'faceless' && lab === 'faceless') || (todayFace === 'unreviewed' && !lab) || (todayFace === 'noface' && lab !== 'face'); };
     const minViews = Number(todayMin);
-    const rows = fresh.filter((v) => tierRank(v) >= minTier && faceOk(v) && (v.views || 0) >= minViews);
+    const minSubs = Number(todaySubs);
+    const rows = fresh.filter((v) => tierRank(v) >= minTier && faceOk(v) && (v.views || 0) >= minViews && (v.subs || 0) >= minSubs);
     const get = cols.find((c) => c[0] === sort.key)[2];
     rows.sort((a, b) => { const x = get(a), y = get(b); if (x == null && y == null) return 0; if (x == null) return 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * sort.dir; });
     const chans = new Set(rows.map((v) => v.channel_id)), cnt = { faceless: 0, face: 0, unsure: 0, none: 0 };
@@ -605,12 +612,12 @@ function pageToday(root) {
     more.hidden = rows.length <= 40; more.textContent = showAll ? 'Show fewer' : `Show all ${rows.length}`;
   }
   more.addEventListener('click', () => { showAll = !showAll; fill(); });
-  card_.append(h('div', { class: 'filters', style: 'margin-top:0' }, winSel, tierSel, minSel, faceSel), summary,
+  card_.append(h('div', { class: 'filters', style: 'margin-top:0' }, winSel, tierSel, minSel, subSel, faceSel), summary,
     h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, head), body)), h('div', { style: 'margin-top:8px' }, more),
     h('details', { class: 'how', style: 'margin-top:12px' }, h('summary', {}, 'How to read this'), h('ul', {},
       h('li', {}, 'Views are what the video earned so far, in under a day, so any tier here is fast. FIRE means views already exceed the channel\'s subscribers. A tiny channel can hit FIRE with a handful of views (10 views on 2 subscribers is 5×), which is why the minimum-views filter starts at 1,000.'),
       h('li', {}, 'FACELESS is a judgment, not a measurement: it comes from looking at thumbnails (judged from thumbnails) or from you (python -m spinwheel label faceless UC…). Channels with no label are simply not reviewed yet.'),
-      h('li', {}, 'This covers regular videos. YouTube\'s “uploaded today” filter leaves out Shorts. A video known only from that filter counts as “last 24 hours” if it was seen under it within a few hours of your newest pull.'),
+      h('li', {}, 'Age and views per hour need an exact publish time, which comes from the YouTube API (python -m spinwheel api enrich) or a full video pull. A video known only from the “uploaded today” search filter shows “< 24h”. That filter leaves out Shorts, the API search does not. A video known only from that filter counts as “last 24 hours” if it was seen under it within a few hours of your newest pull.'),
       h('li', {}, 'Subscriber counts are the channel\'s current count, so a channel that just grew makes its older videos look smaller.'))));
   root.append(card_);
   fill();
