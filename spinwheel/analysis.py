@@ -19,6 +19,9 @@ from typing import Any
 MATURE_DAYS = 14
 MIN_GROUP = 3            # smallest group we'll draw a comparison from
 MIN_MATURE_FOR_PATTERNS = 8
+OUTLIER_X = 2.0          # video outlier: >= this many x its channel's median; channel outlier: same, vs other channels
+MIN_CHANNELS_TO_COMPARE = 3   # a channel needs at least 2 others to be compared with
+BREAKOUTS_SHOWN = 15
 UNKNOWN_CHANNEL = "(unknown channel)"
 
 DURATION_BUCKETS = [
@@ -170,7 +173,7 @@ def _short(t: str, n: int = 60) -> str:
     return t if len(t) <= n else t[: n - 1] + "…"
 
 
-def analyze_channel(vids: list[dict]) -> dict:
+def analyze_channel(vids: list[dict], subs: int | None = None) -> dict:
     mature = [v for v in vids if v["mature"]]
     base = _med([v["views"] for v in mature])
     if len(mature) >= MIN_GROUP:
@@ -227,7 +230,7 @@ def analyze_channel(vids: list[dict]) -> dict:
     changes = sorted((dict(c, video_id=v["id"], video=v["title"]) for v in vids for c in v["title_changes"]),
                      key=lambda c: c["at"], reverse=True)[:25]
 
-    findings = _findings(mature, base, durations, weekdays, features, kws, movers, vids)
+    findings = _findings(mature, base, durations, weekdays, features, kws, movers, vids, subs)
 
     return {
         "videos": sorted(vids, key=lambda v: v["published"] or "", reverse=True),
@@ -240,7 +243,7 @@ def analyze_channel(vids: list[dict]) -> dict:
     }
 
 
-def _findings(mature, base, durations, weekdays, features, kws, movers, vids) -> list[dict]:
+def _findings(mature, base, durations, weekdays, features, kws, movers, vids, subs=None) -> list[dict]:
     out: list[dict] = []
     n = len(mature)
     if n < MIN_MATURE_FOR_PATTERNS:
@@ -251,10 +254,11 @@ def _findings(mature, base, durations, weekdays, features, kws, movers, vids) ->
     scored = [v for v in mature if v["score"] is not None]
     if scored:
         top = max(scored, key=lambda v: v["score"])
-        if top["score"] >= 1.5:
+        if top["score"] >= OUTLIER_X:
+            size = f" on a channel with {_fmt(subs)} subscribers" if subs else ""
             out.append({"kind": "outlier", "text":
                         f"“{_short(top['title'])}” is the biggest outlier: {top['score']:.1f}× the channel median "
-                        f"({_fmt(top['views'])} views). Its topic or angle is the first candidate for a follow-up."})
+                        f"({_fmt(top['views'])} views{size}). Its topic or angle is the first candidate for a follow-up."})
 
     if n >= MIN_MATURE_FOR_PATTERNS:
         d = [x for x in durations if x["n"] >= MIN_GROUP]
@@ -322,12 +326,17 @@ def build_dashboard_data(conn: sqlite3.Connection) -> dict:
         snaps = ch_snaps.get(cid, [])
         title = next((s["title"] for s in reversed(snaps) if s["title"]), cid)
         subs_pts = [s for s in snaps if s["subscribers"] is not None]
-        a = analyze_channel(by_channel.get(cid, []))
+        subs = subs_pts[-1]["subscribers"] if subs_pts else None
+        a = analyze_channel(by_channel.get(cid, []), subs)
+        for v in a["videos"]:
+            v["subs"] = subs
+            v["views_per_sub"] = v["views"] / subs if subs and v["views"] is not None else None
+            v["video_outlier"] = v["score"] is not None and v["score"] >= OUTLIER_X
+            v["channel_outlier"] = None          # filled in once every channel is known
         recent_uploads = 0
         if ref:
             recent_uploads = sum(1 for v in a["videos"]
                                  if v["published"] and _days(ref, parse_ts(v["published"])) <= 90)
-        subs = subs_pts[-1]["subscribers"] if subs_pts else None
         delta = None
         if len(subs_pts) >= 2:
             delta = {"change": subs - subs_pts[0]["subscribers"],
@@ -336,21 +345,56 @@ def build_dashboard_data(conn: sqlite3.Connection) -> dict:
             "id": cid, "title": title, "subscribers": subs, "subs_delta": delta,
             "n_videos": len(a["videos"]), "median_views": a["median_views"],
             "median_engagement": a["median_engagement"], "uploads_90d": recent_uploads,
+            "views_per_sub": a["median_views"] / subs if subs and a["median_views"] else None,
+            "size_ratio": None, "size_ref": None, "size_outlier": None,
             "last_pulled": max([s["captured_at"] for s in snaps] +
                                [v["captured_at"] for v in a["videos"]] or [""]),
         })
         a["growth"] = [[s["captured_at"], s["subscribers"], s["view_count"], s["video_count"]] for s in snaps]
         detail[cid] = a
 
+    _compare_channel_sizes(channels, detail)
     channels.sort(key=lambda c: (-c["n_videos"], c["title"]))
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "data_through": ref.strftime("%Y-%m-%dT%H:%M:%SZ") if ref else None,
         "pulls": len(pulls), "first_pull": pulls[0][0] if pulls else None,
         "video_snapshots": len(v_rows), "channel_snapshots": len(c_rows),
-        "mature_days": MATURE_DAYS, "min_group": MIN_GROUP,
-        "channels": channels, "detail": detail,
+        "mature_days": MATURE_DAYS, "min_group": MIN_GROUP, "outlier_x": OUTLIER_X,
+        "min_channels": MIN_CHANNELS_TO_COMPARE,
+        "channels": channels, "detail": detail, "breakouts": _breakouts(detail),
     }
+
+
+def _compare_channel_sizes(channels: list[dict], detail: dict) -> None:
+    """Flag a channel whose typical video earns >= OUTLIER_X times the views-per-subscriber of the
+    other tracked channels. Left as None (not False) when there aren't enough channels to say."""
+    for c in channels:
+        others = [o["views_per_sub"] for o in channels if o is not c and o["views_per_sub"] is not None]
+        if c["views_per_sub"] is None or len(others) + 1 < MIN_CHANNELS_TO_COMPARE:
+            continue
+        c["size_ref"] = median(others)
+        c["size_ratio"] = c["views_per_sub"] / c["size_ref"]
+        c["size_outlier"] = c["size_ratio"] >= OUTLIER_X
+        a = detail[c["id"]]
+        for v in a["videos"]:
+            v["channel_outlier"] = c["size_outlier"]
+        if c["size_outlier"]:
+            a["findings"].insert(0, {"kind": "channel", "text":
+                f"Channel outlier: a typical video here gets {c['views_per_sub']:.1f}× its {_fmt(c['subscribers'])} "
+                f"subscribers in views, {c['size_ratio']:.1f}× what the other tracked channels get. "
+                f"The channel as a whole is beating its size, so study its format and topics, not only its top video."})
+
+
+def _breakouts(detail: dict) -> list[list[str]]:
+    """Mature videos across all channels ranked by views per subscriber: who got far more views than
+    their audience size would suggest. [[channel_id, video_id], ...]"""
+    if len(detail) < 2:
+        return []
+    rows = [(v["views_per_sub"], cid, v["id"]) for cid, a in detail.items() for v in a["videos"]
+            if v["mature"] and v["views_per_sub"] is not None]
+    rows.sort(reverse=True)
+    return [[cid, vid] for _, cid, vid in rows[:BREAKOUTS_SHOWN]]
 
 
 def to_json(data: dict) -> str:

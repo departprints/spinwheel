@@ -129,6 +129,53 @@ class Analysis(unittest.TestCase):
         self.assertIn("DATA = ", dashboard.render(mem()))
 
 
+def _channel(conn, cid, subs, views, when="2025-06-01T00:00:00Z"):
+    """A channel whose videos (published ~a year before the pull) have the given view counts."""
+    entries = [{"id": f"{cid}v{i:02d}".ljust(11, "x"), "title": f"video {i}", "timestamp": 1700000000 + i * 86400,
+                "duration": 600, "view_count": v, "channel_id": cid} for i, v in enumerate(views)]
+    ingest_text(conn, json.dumps({"_type": "playlist", "id": cid, "channel_id": cid, "channel": cid,
+                                  "channel_follower_count": subs, "entries": entries}), pulled_at=when)
+
+
+class Outliers(unittest.TestCase):
+    def test_video_outlier_is_relative_to_its_own_channel(self):
+        conn = mem()
+        _channel(conn, "UCa", 1000, [100, 100, 100, 100, 100, 100, 100, 900])
+        vids = {v["views"]: v for v in analysis.build_dashboard_data(conn)["detail"]["UCa"]["videos"]}
+        self.assertTrue(vids[900]["video_outlier"])
+        self.assertFalse(vids[100]["video_outlier"])
+        self.assertEqual(vids[900]["subs"], 1000)
+        self.assertAlmostEqual(vids[900]["views_per_sub"], 0.9)
+
+    def test_channel_outlier_needs_three_channels(self):
+        conn = mem()
+        _channel(conn, "UCa", 1000, [5000] * 5)            # 5 views per subscriber
+        _channel(conn, "UCb", 100000, [500000] * 5)        # 5
+        d = analysis.build_dashboard_data(conn)
+        self.assertTrue(all(c["size_outlier"] is None for c in d["channels"]))   # unknown, not False
+        self.assertTrue(all(v["channel_outlier"] is None for a in d["detail"].values() for v in a["videos"]))
+
+    def test_channel_outlier_flags_the_one_beating_its_size(self):
+        conn = mem()
+        _channel(conn, "UCa", 1000, [5000] * 5)
+        _channel(conn, "UCb", 100000, [500000] * 5)
+        _channel(conn, "UCc", 1000, [50000] * 5)           # 50 views per subscriber vs 5 elsewhere
+        d = analysis.build_dashboard_data(conn)
+        flags = {c["id"]: c["size_outlier"] for c in d["channels"]}
+        self.assertEqual(flags, {"UCa": False, "UCb": False, "UCc": True})
+        self.assertTrue(all(v["channel_outlier"] for v in d["detail"]["UCc"]["videos"]))
+        self.assertEqual(d["detail"]["UCc"]["findings"][0]["kind"], "channel")
+        self.assertEqual(d["breakouts"][0][0], "UCc")
+
+    def test_missing_subscribers_gives_no_ratio_and_no_crash(self):
+        conn = mem()
+        ingest_text(conn, json.dumps({"id": "vid00000001", "title": "t", "view_count": 5,
+                                      "timestamp": 1700000000, "channel_id": "UCx"}), pulled_at="2025-06-01T00:00:00Z")
+        d = analysis.build_dashboard_data(conn)
+        self.assertIsNone(d["detail"]["UCx"]["videos"][0]["views_per_sub"])
+        self.assertIsNone(d["channels"][0]["views_per_sub"])
+
+
 class DemoData(unittest.TestCase):
     def test_demo_pipeline_produces_findings(self):
         import importlib.util, tempfile
@@ -137,7 +184,7 @@ class DemoData(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             mod.main(f"{d}/x.db")
             data = analysis.build_dashboard_data(db.connect(f"{d}/x.db"))
-        self.assertEqual(len(data["channels"]), 2)
+        self.assertEqual(len(data["channels"]), 3)
         self.assertTrue(data["detail"]["UCdemoMine0001"]["findings"])
 
 

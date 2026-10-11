@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fill a database with SYNTHETIC yt-dlp-shaped pulls so the dashboard can be tried before real data exists.
 
-Two made-up channels, weekly pulls over six weeks, a few planted patterns (numbers in titles and
+Three made-up channels, weekly pulls over six weeks, a few planted patterns (numbers in titles and
 8-15 min videos do better) and one title change. Nothing here is real YouTube data.
 
     python scripts/make_demo_data.py demo/demo.db
@@ -74,7 +74,9 @@ def entry(v, ch, when):
 def main(path):
     rng = random.Random(7)
     chans = [make_channel(rng, "UCdemoMine0001", "Demo: Your Channel", 42, 8200, 30000),
-             make_channel(rng, "UCdemoRival002", "Demo: Competitor A", 30, 61000, 160000)]
+             make_channel(rng, "UCdemoRival002", "Demo: Competitor A", 30, 61000, 160000),
+             # small audience, big views: should be flagged as a channel outlier
+             make_channel(rng, "UCdemoSmall003", "Demo: Small Breakout", 24, 2100, 30000)]
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(path)
     for k, when in enumerate(PULLS):
