@@ -540,13 +540,52 @@ function scopeBar() {
   if (mode !== 'all') bar.append(h('p', { class: 'banner' }, `Showing ${NOUN[mode]} only. Every number, chart, idea and comparison on this page uses ${NOUN[mode]} only, measured against other ${NOUN[mode]}.`));
 }
 
+// ---------------------------------------------------------------- refresh helper
+// Served by `spinwheel serve`: same origin. Opened as a saved file: talk to the helper on this computer.
+const HELPER = LIVE ? '' : 'http://127.0.0.1:8765';
+async function helper(path, body) {
+  const res = await fetch(HELPER + path, { method: 'POST', headers: { 'X-Spinwheel': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const out = await res.json();
+  if (!res.ok) throw new Error(out.error || res.status);
+  return out;
+}
+function helperError(e) {
+  return e instanceof TypeError ? 'The refresh helper is not running. Run once in a terminal: python3 -m spinwheel autostart install' : 'Failed: ' + e.message;
+}
+function finish(out, okNote) {                   // remember the outcome across the reload, then show the new data
+  const bad = out.steps.filter((s) => !s.ok);
+  sessionStorage.setItem('spinwheel-refresh-note', bad.length ? 'Finished with problems: ' + bad.map((s) => `${s.step} (${s.detail})`).join('; ') : okNote);
+  location.reload();
+}
+function addSourceForm() {
+  const kind = h('select', { 'aria-label': 'What to add' }, h('option', { value: 'topic' }, 'Topic (keyword)'), h('option', { value: 'channel' }, 'Channel'));
+  const input = h('textarea', { rows: '4', placeholder: 'One per line, e.g.\nvan life\nstoicism motivation voiceover', 'aria-label': 'Topics or channels, one per line', style: 'min-width:min(360px,100%)' });
+  const msg = h('p', { class: 'sub', role: 'status' });
+  const go = h('button', { type: 'button' }, 'Add and fetch');
+  const run = async () => {
+    const value = input.value.trim();
+    if (!value) { msg.textContent = 'Type at least one topic or channel first.'; return; }
+    go.disabled = true; msg.textContent = 'Fetching… about half a minute per item. Keep this tab open.';
+    try {
+      const out = await helper('/track', { kind: kind.value, value });
+      const bad = out.steps.filter((x) => !x.ok);
+      if (bad.length === out.steps.length) throw new Error(bad.map((x) => `${x.step}: ${x.detail}`).join('; '));
+      finish(out, `Added ${out.steps.length - bad.length} item(s).`);
+    } catch (e) { msg.textContent = helperError(e); go.disabled = false; }
+  };
+  go.addEventListener('click', run);
+  return h('section', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'Add a topic or channel'),
+    h('p', { class: 'sub' }, 'A topic is a keyword to search YouTube for (videos uploaded in the last 24 hours). A channel is an @handle or a channel link. Add several at once, one per line. Everything you add is fetched again each time you press Refresh data.'),
+    h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px' }, kind, input, go), msg);
+}
+
 function render() {
   redraws.length = 0;
   const root = $('content'); root.textContent = '';
   renderNav();
   if (!HAS()) {
     $('bar').textContent = '';
-    root.append(h('p', { class: 'empty' }, 'No data yet. Run: python -m spinwheel search "your topic" --within today, then rebuild this dashboard.'));
+    root.append(h('p', { class: 'empty' }, 'No data yet. Add a topic or a channel below; it will be fetched and shown here.'), addSourceForm());
     return;
   }
   rebuildVid(); setFresh(); scopeBar();
@@ -768,6 +807,7 @@ function pageData(root) {
     h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'When (UTC)'), h('th', {}, 'Source'), h('th', {}, 'Command'))),
       h('tbody', {}, o.pulls.map((x) => h('tr', {}, h('td', {}, x.at.slice(0, 16).replace('T', ' ')), h('td', {}, x.source), h('td', { class: 'note', style: 'overflow-wrap:anywhere' }, x.command || '—'))))))));
 
+  root.append(addSourceForm());
   root.append(h('section', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'Refresh your data'), h('p', { class: 'sub' }, LIVE ? 'Use the Refresh data button at the top to repeat your earlier pulls, topic searches, subscriber counts and publish dates. Comments, labels and suggestions are separate commands:'
       : 'Run `python -m spinwheel serve` for a page with a one-click Refresh button, or run these on your own computer and rebuild this page.'),
     h('pre', { class: 'cmd' }, ['python -m spinwheel search "your topic" --within today --max-results 20',
@@ -1186,24 +1226,14 @@ $('dlg').addEventListener('click', (e) => { if (e.target === $('dlg')) $('dlg').
 
 // theme + resize ----------------------------------------------------
 {
-  // Served by `spinwheel serve`: same origin. Opened as a saved file: talk to the helper on this computer.
   const btn = $('refresh'), status = $('refresh-status');
-  const url = LIVE ? '/refresh' : 'http://127.0.0.1:8765/refresh';
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     status.textContent = 'Refreshing… this can take a few minutes. Keep this tab open.';
     try {
-      const res = await fetch(url, { method: 'POST', headers: { 'X-Spinwheel': '1' } });
-      const out = await res.json();
-      if (!res.ok) throw new Error(out.error || res.status);
-      const bad = out.steps.filter((s) => !s.ok);
-      if (bad.length) sessionStorage.setItem('spinwheel-refresh-note', 'Refreshed with problems: ' + bad.map((s) => `${s.step} (${s.detail})`).join('; '));
-      else sessionStorage.setItem('spinwheel-refresh-note', 'Refreshed just now.');
-      location.reload();
+      finish(await helper('/refresh'), 'Refreshed just now.');
     } catch (e) {
-      status.textContent = e instanceof TypeError
-        ? 'The refresh helper is not running. In a terminal, run: python -m spinwheel serve'
-        : 'Refresh failed: ' + e.message;
+      status.textContent = helperError(e);
       btn.disabled = false;
     }
   });
