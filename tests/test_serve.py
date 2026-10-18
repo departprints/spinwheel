@@ -97,6 +97,19 @@ class ServeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             serve.track(self.path, "bogus", "x")
 
+    def test_track_adds_many_at_once_and_validates_before_fetching(self):
+        with mock.patch("spinwheel.serve.discover.search", return_value={"failed": {"b": "boom"}, "done": True}) as s:
+            steps = serve.track(self.path, "topic", "a\n\n b \na\nc")
+        self.assertEqual(s.call_args.args[1], ["a", "b", "c"])
+        self.assertEqual([x["ok"] for x in steps], [True, False, True])
+        calls = []
+        run = lambda cmd, **kw: calls.append(cmd) or mock.Mock(returncode=0, stdout=PULL, stderr="")
+        with self.assertRaises(ValueError):
+            serve.track(self.path, "channel", "@ok\nnot a channel", run=run)
+        self.assertEqual(calls, [])  # nothing fetched because one line was invalid
+        with self.assertRaises(ValueError):
+            serve.track(self.path, "topic", "\n".join(str(i) for i in range(serve.MAX_ADD + 1)))
+
     def test_track_topic_searches_and_remembers_it(self):
         with mock.patch("spinwheel.serve.discover.search", return_value={"failed": {}, "done": True}) as s:
             steps = serve.track(self.path, "topic", "van life")

@@ -559,23 +559,23 @@ function finish(out, okNote) {                   // remember the outcome across 
 }
 function addSourceForm() {
   const kind = h('select', { 'aria-label': 'What to add' }, h('option', { value: 'topic' }, 'Topic (keyword)'), h('option', { value: 'channel' }, 'Channel'));
-  const input = h('input', { type: 'text', placeholder: 'van life   or   @channelname', 'aria-label': 'Topic or channel', style: 'min-width:min(320px,100%)' });
+  const input = h('textarea', { rows: '4', placeholder: 'One per line, e.g.\nvan life\nstoicism motivation voiceover', 'aria-label': 'Topics or channels, one per line', style: 'min-width:min(360px,100%)' });
   const msg = h('p', { class: 'sub', role: 'status' });
   const go = h('button', { type: 'button' }, 'Add and fetch');
   const run = async () => {
     const value = input.value.trim();
-    if (!value) { msg.textContent = 'Type a topic or a channel first.'; return; }
-    go.disabled = true; msg.textContent = 'Fetching… this can take a minute or two. Keep this tab open.';
+    if (!value) { msg.textContent = 'Type at least one topic or channel first.'; return; }
+    go.disabled = true; msg.textContent = 'Fetching… about half a minute per item. Keep this tab open.';
     try {
       const out = await helper('/track', { kind: kind.value, value });
-      if (!out.ok) throw new Error(out.steps[0].detail);
-      finish(out, `Added ${value}.`);
+      const bad = out.steps.filter((x) => !x.ok);
+      if (bad.length === out.steps.length) throw new Error(bad.map((x) => `${x.step}: ${x.detail}`).join('; '));
+      finish(out, `Added ${out.steps.length - bad.length} item(s).`);
     } catch (e) { msg.textContent = helperError(e); go.disabled = false; }
   };
   go.addEventListener('click', run);
-  input.addEventListener('keydown', (e) => e.key === 'Enter' && run());
   return h('section', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'Add a topic or channel'),
-    h('p', { class: 'sub' }, 'A topic is a keyword to search YouTube for (videos uploaded in the last 24 hours). A channel is an @handle or a channel link. Everything you add is fetched again each time you press Refresh data.'),
+    h('p', { class: 'sub' }, 'A topic is a keyword to search YouTube for (videos uploaded in the last 24 hours). A channel is an @handle or a channel link. Add several at once, one per line. Everything you add is fetched again each time you press Refresh data.'),
     h('div', { style: 'display:flex;flex-wrap:wrap;gap:8px' }, kind, input, go), msg);
 }
 

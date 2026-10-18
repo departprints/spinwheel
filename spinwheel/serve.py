@@ -127,29 +127,37 @@ def channel_url(value: str) -> str:
     return f"https://www.youtube.com/{urllib.parse.quote(m.group(1), safe='/@')}/videos"
 
 
+MAX_ADD = 30
+
+
 def track(db_path: str, kind: str, value: str, *, yt_dlp: str = "yt-dlp", extra: list[str] | None = None,
           run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> list[dict]:
-    """Add one topic (a keyword search, remembered) or channel (a pull, repeated by Refresh) and fetch it now."""
+    """Add topics (keyword searches, remembered) or channels (pulls, repeated by Refresh), one per line, and fetch them now."""
     extra = extra or []
-    value = value.strip()
-    if not value or len(value) > 200 or any(ord(c) < 32 for c in value):
+    values = list(dict.fromkeys(v.strip() for v in value.splitlines() if v.strip()))
+    if not values or any(len(v) > 200 or any(ord(c) < 32 for c in v) for v in values):
         raise ValueError("type a topic or a channel first")
+    if len(values) > MAX_ADD:
+        raise ValueError(f"add at most {MAX_ADD} at a time")
+    if kind not in ("topic", "channel"):
+        raise ValueError("kind must be topic or channel")
+    urls = {v: channel_url(v) for v in values} if kind == "channel" else {}  # validate everything before fetching anything
     conn = db.connect(db_path)
     try:
         if kind == "topic":
-            r = discover.search(conn, [value], within="today", yt_dlp=yt_dlp, extra=extra)
-            err = r["failed"].get(value)
-            return [{"step": f"Topic: {value}", "ok": not err, "detail": err or "searched and stored"}]
-        if kind == "channel":
-            url = channel_url(value)
-            stored = [yt_dlp, "-J", "--flat-playlist", "--playlist-end", str(CHANNEL_PULL_LIMIT), url]
+            r = discover.search(conn, values, within="today", yt_dlp=yt_dlp, extra=extra)
+            return [{"step": f"Topic: {v}", "ok": v not in r["failed"], "detail": r["failed"].get(v, "searched and stored")} for v in values]
+        steps = []
+        for v in values:
+            stored = [yt_dlp, "-J", "--flat-playlist", "--playlist-end", str(CHANNEL_PULL_LIMIT), urls[v]]
             proc = run([stored[0], *extra, *stored[1:]], capture_output=True, text=True, timeout=PULL_TIMEOUT)
             if proc.returncode != 0:
                 tail = (proc.stderr or "").strip().splitlines()[-1:] or ["no details"]
-                return [{"step": f"Channel: {value}", "ok": False, "detail": f"yt-dlp exited {proc.returncode}: {tail[0]}"}]
+                steps.append({"step": f"Channel: {v}", "ok": False, "detail": f"yt-dlp exited {proc.returncode}: {tail[0]}"})
+                continue
             ingest_text(conn, proc.stdout, command=shlex.join(["yt-dlp", *stored[1:]]))
-            return [{"step": f"Channel: {value}", "ok": True, "detail": "pulled and stored"}]
-        raise ValueError("kind must be topic or channel")
+            steps.append({"step": f"Channel: {v}", "ok": True, "detail": "pulled and stored"})
+        return steps
     finally:
         conn.close()
 
