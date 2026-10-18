@@ -107,7 +107,7 @@ def refresh(db_path: str, *, yt_dlp: str = "yt-dlp", extra: list[str] | None = N
     return steps
 
 
-def make_handler(db_path: str, short_max: int, yt_dlp: str, extra: list[str]):
+def make_handler(db_path: str, short_max: int, yt_dlp: str, extra: list[str], output: str | None = None):
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
@@ -137,6 +137,20 @@ def make_handler(db_path: str, short_max: int, yt_dlp: str, extra: list[str]):
                 conn.close()
             self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
 
+        def _cors(self) -> None:
+            # a saved dashboard.html opened from disk has the origin "null"; allow only that, only for /refresh
+            if self.headers.get("Origin") == "null":
+                self.send_header("Access-Control-Allow-Origin", "null")
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            if self._host_ok() and self.path == "/refresh":
+                self._cors()
+                self.send_header("Access-Control-Allow-Methods", "POST")
+                self.send_header("Access-Control-Allow-Headers", GUARD_HEADER)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def do_POST(self):
             if not self._host_ok() or self.headers.get(GUARD_HEADER) != "1":
                 return self._json(403, {"error": "forbidden"})
@@ -146,9 +160,21 @@ def make_handler(db_path: str, short_max: int, yt_dlp: str, extra: list[str]):
                 return self._json(409, {"error": "a refresh is already running"})
             try:
                 steps = refresh(db_path, yt_dlp=yt_dlp, extra=extra)
+                if output:  # so a dashboard.html opened from disk shows the new data on reload
+                    conn = db.connect(db_path)
+                    try:
+                        dashboard.write(conn, output, short_max)
+                    finally:
+                        conn.close()
             finally:
                 lock.release()
-            self._json(200, {"steps": steps, "ok": all(s["ok"] for s in steps)})
+            body = json.dumps({"steps": steps, "ok": all(s["ok"] for s in steps)}).encode()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def log_message(self, fmt, *args):
             print("  " + fmt % args)
@@ -157,8 +183,8 @@ def make_handler(db_path: str, short_max: int, yt_dlp: str, extra: list[str]):
 
 
 def serve(db_path: str, *, port: int = 8765, short_max: int = SHORT_MAX_SECONDS, yt_dlp: str = "yt-dlp",
-          extra: list[str] | None = None, open_browser: bool = False) -> None:
-    server = ThreadingHTTPServer((HOST, port), make_handler(db_path, short_max, yt_dlp, extra or []))
+          extra: list[str] | None = None, open_browser: bool = False, output: str | None = None) -> None:
+    server = ThreadingHTTPServer((HOST, port), make_handler(db_path, short_max, yt_dlp, extra or [], output))
     url = f"http://{HOST}:{server.server_address[1]}/"
     print(f"dashboard at {url}  (Ctrl+C to stop)")
     if open_browser:

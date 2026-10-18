@@ -57,6 +57,25 @@ class ServeTests(unittest.TestCase):
         self.assertIn("const LIVE = false;", dashboard.render(self.conn))
         self.assertIn("const LIVE = true;", dashboard.render(self.conn, live=True))
 
+    def test_refresh_from_saved_file_rewrites_it_and_allows_null_origin(self):
+        out = os.path.join(self.dir.name, "dashboard.html")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), serve.make_handler(self.path, 60, "yt-dlp", [], out))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            pre = urllib.request.urlopen(urllib.request.Request(base + "/refresh", method="OPTIONS", headers={"Origin": "null"}))
+            self.assertEqual(pre.headers["Access-Control-Allow-Origin"], "null")
+            other = urllib.request.urlopen(urllib.request.Request(base + "/refresh", method="OPTIONS", headers={"Origin": "https://evil.example"}))
+            self.assertIsNone(other.headers["Access-Control-Allow-Origin"])
+            with mock.patch("spinwheel.serve.refresh", return_value=[{"step": "x", "ok": True, "detail": ""}]):
+                r = urllib.request.urlopen(urllib.request.Request(
+                    base + "/refresh", method="POST", headers={"Origin": "null", "X-Spinwheel": "1"}))
+            self.assertEqual(r.headers["Access-Control-Allow-Origin"], "null")
+            self.assertIn("const LIVE = false;", open(out, encoding="utf-8").read())
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_http_guards(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), serve.make_handler(self.path, 60, "yt-dlp", []))
         threading.Thread(target=server.serve_forever, daemon=True).start()

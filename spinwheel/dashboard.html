@@ -171,7 +171,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
     </div>
     <div class="top-actions">
       <span class="sub" id="refresh-status" role="status" aria-live="polite"></span>
-      <button id="refresh" type="button" hidden>Refresh data</button>
+      <button id="refresh" type="button">Refresh data</button>
       <button id="theme" type="button" aria-label="Toggle light and dark theme">Theme</button>
     </div>
   </header>
@@ -1185,14 +1185,15 @@ function openVideo(v) {
 $('dlg').addEventListener('click', (e) => { if (e.target === $('dlg')) $('dlg').close(); });
 
 // theme + resize ----------------------------------------------------
-if (LIVE) {
+{
+  // Served by `spinwheel serve`: same origin. Opened as a saved file: talk to the helper on this computer.
   const btn = $('refresh'), status = $('refresh-status');
-  btn.hidden = false;
+  const url = LIVE ? '/refresh' : 'http://127.0.0.1:8765/refresh';
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     status.textContent = 'Refreshing… this can take a few minutes. Keep this tab open.';
     try {
-      const res = await fetch('/refresh', { method: 'POST', headers: { 'X-Spinwheel': '1' } });
+      const res = await fetch(url, { method: 'POST', headers: { 'X-Spinwheel': '1' } });
       const out = await res.json();
       if (!res.ok) throw new Error(out.error || res.status);
       const bad = out.steps.filter((s) => !s.ok);
@@ -1200,7 +1201,9 @@ if (LIVE) {
       else sessionStorage.setItem('spinwheel-refresh-note', 'Refreshed just now.');
       location.reload();
     } catch (e) {
-      status.textContent = 'Refresh failed: ' + e.message;
+      status.textContent = e instanceof TypeError
+        ? 'The refresh helper is not running. In a terminal, run: python -m spinwheel serve'
+        : 'Refresh failed: ' + e.message;
       btn.disabled = false;
     }
   });
