@@ -7,7 +7,7 @@ import shlex
 import subprocess
 import sys
 
-from . import analysis, comments, dashboard, db, discover, serve, suggest, youtube_api
+from . import analysis, autostart, comments, dashboard, db, discover, serve, suggest, youtube_api
 from .ingest import ingest_text, utc_iso
 
 
@@ -50,6 +50,18 @@ def cmd_serve(args) -> int:
     db.connect(args.db).close()  # create/migrate the database before the first request
     serve.serve(args.db, port=args.port, short_max=args.short_max, yt_dlp=args.yt_dlp, extra=_extra(args),
                 open_browser=args.open, output=args.output or None)
+    return 0
+
+
+def cmd_autostart(args) -> int:
+    if args.action == "install":
+        path = autostart.install(args.db, args.output, yt_dlp=args.yt_dlp, port=args.port, extra_args=_extra(args))
+        print(f"installed {path}\nthe refresh helper now starts at login and is running now (http://127.0.0.1:{args.port}/)\n"
+              f"it uses the database and dashboard in {args.db} / {args.output}; log: {autostart.LOG}")
+    elif args.action == "uninstall":
+        print("removed the login item" if autostart.uninstall() else "was not installed")
+    else:
+        print("running" if autostart.running() else "not running")
     return 0
 
 
@@ -301,6 +313,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-o", "--output", default="dashboard.html", metavar="FILE",
                    help="after each refresh, also rewrite this file so a saved dashboard.html shows the new data (default dashboard.html; '' = don't)")
     p.set_defaults(fn=cmd_serve)
+
+    p = sub.add_parser("autostart", parents=[common], help="macOS: start the refresh helper at login, so the dashboard's button always works")
+    p.add_argument("action", choices=["install", "uninstall", "status"])
+    p.add_argument("--port", type=int, default=8765, help="must match the dashboard button (default 8765)")
+    p.add_argument("-o", "--output", default="dashboard.html", metavar="FILE", help="dashboard file to rewrite after each refresh")
+    p.set_defaults(fn=cmd_autostart)
 
     p = sub.add_parser("label", help="record a judgment about channels, e.g. faceless (kept as history; the latest wins)")
     p.add_argument("label", choices=["faceless", "face", "unsure"])
