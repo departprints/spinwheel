@@ -7,7 +7,7 @@ import shlex
 import subprocess
 import sys
 
-from . import analysis, comments, dashboard, db, discover, suggest, youtube_api
+from . import analysis, comments, dashboard, db, discover, serve, suggest, youtube_api
 from .ingest import ingest_text, utc_iso
 
 
@@ -43,6 +43,13 @@ def cmd_dashboard(args) -> int:
     conn = db.connect(args.db)
     path = dashboard.write(conn, args.output, short_max=args.short_max)
     print(f"dashboard written to {path}")
+    return 0
+
+
+def cmd_serve(args) -> int:
+    db.connect(args.db).close()  # create/migrate the database before the first request
+    serve.serve(args.db, port=args.port, short_max=args.short_max, yt_dlp=args.yt_dlp, extra=_extra(args),
+                open_browser=args.open)
     return 0
 
 
@@ -286,6 +293,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_enrich)
+
+    p = sub.add_parser("serve", parents=[common], help="serve the dashboard locally with a Refresh button that re-pulls your data")
+    p.add_argument("--port", type=int, default=8765, help="port on 127.0.0.1 (default 8765)")
+    p.add_argument("--short-max", type=int, default=60, metavar="SECONDS", help="as for `dashboard` (default 60)")
+    p.add_argument("--open", action="store_true", help="open the dashboard in your browser")
+    p.set_defaults(fn=cmd_serve)
 
     p = sub.add_parser("label", help="record a judgment about channels, e.g. faceless (kept as history; the latest wins)")
     p.add_argument("label", choices=["faceless", "face", "unsure"])

@@ -38,6 +38,8 @@ h2 { font-size: 15px; margin: 32px 0 12px; font-weight: 650; }
 h3 { font-size: 14px; margin: 0; font-weight: 650; }
 .sub, .note { color: var(--ink-2); font-size: 13px; margin: 2px 0 0; }
 .note { color: var(--muted); }
+.top-actions { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.top-actions [hidden] { display: none; }
 header.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; justify-content: space-between; }
 .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 16px 0 8px; }
 select, input[type=search], button { font: inherit; color: var(--ink); background: var(--surface);
@@ -167,7 +169,11 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
       <h1>Spinwheel</h1>
       <p class="sub" id="fresh"></p>
     </div>
-    <button id="theme" type="button" aria-label="Toggle light and dark theme">Theme</button>
+    <div class="top-actions">
+      <span class="sub" id="refresh-status" role="status" aria-live="polite"></span>
+      <button id="refresh" type="button" hidden>Refresh data</button>
+      <button id="theme" type="button" aria-label="Toggle light and dark theme">Theme</button>
+    </div>
   </header>
   <nav class="nav" id="nav" aria-label="Pages"></nav>
   <div id="bar"></div>
@@ -179,6 +185,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
 
 <script>
 const DATA = /*__SPINWHEEL_DATA__*/null;
+const LIVE = /*__SPINWHEEL_LIVE__*/false;   // true only when served by `spinwheel serve`
 
 // ---------------------------------------------------------------- helpers
 const NS = 'http://www.w3.org/2000/svg';
@@ -761,7 +768,8 @@ function pageData(root) {
     h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'When (UTC)'), h('th', {}, 'Source'), h('th', {}, 'Command'))),
       h('tbody', {}, o.pulls.map((x) => h('tr', {}, h('td', {}, x.at.slice(0, 16).replace('T', ' ')), h('td', {}, x.source), h('td', { class: 'note', style: 'overflow-wrap:anywhere' }, x.command || '—'))))))));
 
-  root.append(h('section', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'Refresh your data'), h('p', { class: 'sub' }, 'Run these on your own computer, then rebuild this page.'),
+  root.append(h('section', { class: 'card', style: 'margin-top:12px' }, h('h3', {}, 'Refresh your data'), h('p', { class: 'sub' }, LIVE ? 'Use the Refresh data button at the top to repeat your earlier pulls, topic searches, subscriber counts and publish dates. Comments, labels and suggestions are separate commands:'
+      : 'Run `python -m spinwheel serve` for a page with a one-click Refresh button, or run these on your own computer and rebuild this page.'),
     h('pre', { class: 'cmd' }, ['python -m spinwheel search "your topic" --within today --max-results 20',
       'python -m spinwheel channels                       # subscriber counts',
       'python -m spinwheel enrich                         # publish dates that were refused',
@@ -1177,6 +1185,29 @@ function openVideo(v) {
 $('dlg').addEventListener('click', (e) => { if (e.target === $('dlg')) $('dlg').close(); });
 
 // theme + resize ----------------------------------------------------
+if (LIVE) {
+  const btn = $('refresh'), status = $('refresh-status');
+  btn.hidden = false;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    status.textContent = 'Refreshing… this can take a few minutes. Keep this tab open.';
+    try {
+      const res = await fetch('/refresh', { method: 'POST', headers: { 'X-Spinwheel': '1' } });
+      const out = await res.json();
+      if (!res.ok) throw new Error(out.error || res.status);
+      const bad = out.steps.filter((s) => !s.ok);
+      if (bad.length) sessionStorage.setItem('spinwheel-refresh-note', 'Refreshed with problems: ' + bad.map((s) => `${s.step} (${s.detail})`).join('; '));
+      else sessionStorage.setItem('spinwheel-refresh-note', 'Refreshed just now.');
+      location.reload();
+    } catch (e) {
+      status.textContent = 'Refresh failed: ' + e.message;
+      btn.disabled = false;
+    }
+  });
+  const note = sessionStorage.getItem('spinwheel-refresh-note');
+  if (note) { status.textContent = note; sessionStorage.removeItem('spinwheel-refresh-note'); }
+}
+
 $('theme').addEventListener('click', () => {
   const cur = document.documentElement.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   const next = cur === 'dark' ? 'light' : 'dark';

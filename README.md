@@ -30,6 +30,8 @@ python -m spinwheel comments                     # fetch top comments for them, 
 python -m spinwheel status                       # what's stored
 ```
 
+**One-click refresh.** `python -m spinwheel serve --open` serves the dashboard at `http://127.0.0.1:8765/` with a **Refresh data** button. It repeats your earlier channel pulls, re-runs your tracked topic searches, then updates subscriber counts and missing publish dates, and reloads the page. Each step is reported, and one failing step doesn't stop the others. It can take a few minutes. Comments, labels and autocomplete suggestions stay separate commands. The server listens on 127.0.0.1 only. The plain `dashboard -o dashboard.html` file still works and has no button.
+
 The database is `spinwheel.db` in the current directory (`--db PATH` to change it, placed before the subcommand).
 
 **Accepted input** (auto-detected): `yt-dlp -J` / `--dump-json` output for videos, channels and playlists, and YouTube Data API v3 responses (`videos.list`, `channels.list`, `search.list`, `playlistItems.list`). Anything else is rejected and nothing is stored.
