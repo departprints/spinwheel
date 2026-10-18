@@ -9,12 +9,15 @@ from .analysis import SHORT_MAX_SECONDS, build_dashboard_data, to_json
 
 TEMPLATE = Path(__file__).with_name("dashboard.html")
 PLACEHOLDER = "/*__SPINWHEEL_DATA__*/null"
+LIVE_PLACEHOLDER = "/*__SPINWHEEL_LIVE__*/false"
 
 
-def render(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SECONDS) -> str:
+def render(conn: sqlite3.Connection, short_max: int = SHORT_MAX_SECONDS, live: bool = False) -> str:
+    """`live` is true only when `spinwheel serve` renders the page; it turns on the Refresh button."""
     html = TEMPLATE.read_text(encoding="utf-8")
-    if PLACEHOLDER not in html:
+    if PLACEHOLDER not in html or LIVE_PLACEHOLDER not in html:
         raise RuntimeError("dashboard template is missing its data placeholder")
+    html = html.replace(LIVE_PLACEHOLDER, "true" if live else "false", 1)
     return html.replace(PLACEHOLDER, to_json(build_dashboard_data(conn, short_max)), 1)
 
 
