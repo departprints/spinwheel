@@ -76,6 +76,53 @@ class ServeTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_channel_url_accepts_handles_and_links_only(self):
+        self.assertEqual(serve.channel_url("@Cool.Chan"), "https://www.youtube.com/@Cool.Chan/videos")
+        self.assertEqual(serve.channel_url("youtube.com/@x/featured?a=1"), "https://www.youtube.com/@x/videos")
+        self.assertEqual(serve.channel_url("https://www.youtube.com/channel/UC123/about"), "https://www.youtube.com/channel/UC123/videos")
+        for bad in ("cats", "https://evil.example/@x", "https://youtube.com.evil.example/@x", "file:///etc/passwd", "https://www.youtube.com/watch?v=1"):
+            with self.assertRaises(ValueError):
+                serve.channel_url(bad)
+
+    def test_track_channel_stores_a_pull_that_refresh_repeats(self):
+        run = lambda cmd, **kw: mock.Mock(returncode=0, stdout=PULL, stderr="")
+        steps = serve.track(self.path, "channel", "@newchan", run=run)
+        self.assertTrue(steps[0]["ok"])
+        cmds = serve.stored_pull_commands(self.conn)
+        self.assertIn("https://www.youtube.com/@newchan/videos", [c[-1] for c in cmds])
+        failing = lambda cmd, **kw: mock.Mock(returncode=1, stdout="", stderr="oops\nnot found")
+        self.assertFalse(serve.track(self.path, "channel", "@gone", run=failing)[0]["ok"])
+        with self.assertRaises(ValueError):
+            serve.track(self.path, "channel", "   ")
+        with self.assertRaises(ValueError):
+            serve.track(self.path, "bogus", "x")
+
+    def test_track_topic_searches_and_remembers_it(self):
+        with mock.patch("spinwheel.serve.discover.search", return_value={"failed": {}, "done": True}) as s:
+            steps = serve.track(self.path, "topic", "van life")
+        self.assertTrue(steps[0]["ok"])
+        self.assertEqual(s.call_args.kwargs["within"], "today")
+
+    def test_http_track_validates_input(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), serve.make_handler(self.path, 60, "yt-dlp", []))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            req = lambda body, hdr=None: urllib.request.Request(base + "/track", data=body, method="POST",
+                                                                headers={"X-Spinwheel": "1", **(hdr or {})})
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req(b'{"kind":"channel","value":"https://evil.example/x"}'))
+            self.assertEqual(e.exception.code, 400)
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req(b"not json"))
+            self.assertEqual(e.exception.code, 400)
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(urllib.request.Request(base + "/track", data=b"{}", method="POST"))  # no guard header
+            self.assertEqual(e.exception.code, 403)
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_http_guards(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), serve.make_handler(self.path, 60, "yt-dlp", []))
         threading.Thread(target=server.serve_forever, daemon=True).start()

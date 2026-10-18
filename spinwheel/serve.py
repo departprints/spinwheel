@@ -1,7 +1,7 @@
 """Serve the dashboard locally so its Refresh button can pull new data and rebuild the page.
 
 The static `dashboard.html` cannot run commands. `spinwheel serve` renders the same page on each
-request and adds one endpoint, POST /refresh, which re-runs what you already track:
+request and adds POST /track (add a topic or channel and fetch it) and POST /refresh, which re-runs what you already track:
   1. every channel/playlist pull stored before (the yt-dlp command is kept with each pull),
   2. every tracked search topic,
   3. subscriber counts older than a day,
@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import threading
+import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
@@ -81,7 +83,7 @@ def refresh(db_path: str, *, yt_dlp: str = "yt-dlp", extra: list[str] | None = N
         topics = discover.tracked_topics(conn)
         if not topics:
             return True, "no tracked topics"
-        r = discover.search(conn, topics, yt_dlp=yt_dlp, extra=extra)
+        r = discover.search(conn, topics, within="today", yt_dlp=yt_dlp, extra=extra)
         bad = [f"{q}: {e}" for q, e in r["failed"].items()]
         return not bad, f"{len(topics) - len(bad)} of {len(topics)} topic(s) searched" + (f"; {'; '.join(bad)}" if bad else "")
 
@@ -105,6 +107,51 @@ def refresh(db_path: str, *, yt_dlp: str = "yt-dlp", extra: list[str] | None = N
     step("Publish dates", enrich)
     conn.close()
     return steps
+
+
+_HANDLE = re.compile(r"^@[\w.\-]{1,60}$")
+_CHANNEL_PATH = re.compile(r"^/(@[^/]+|(?:channel|c|user)/[^/]+)")
+CHANNEL_PULL_LIMIT = 50
+
+
+def channel_url(value: str) -> str:
+    """A channel's /videos page from an @handle or a YouTube channel link; anything else is rejected."""
+    v = value.strip()
+    if _HANDLE.match(v):
+        return f"https://www.youtube.com/{v}/videos"
+    p = urllib.parse.urlparse(v if "://" in v else "https://" + v)
+    host = (p.hostname or "").lower()
+    m = _CHANNEL_PATH.match(urllib.parse.unquote(p.path))
+    if p.scheme not in ("http", "https") or not (host == "youtube.com" or host.endswith(".youtube.com")) or not m:
+        raise ValueError("that doesn't look like a YouTube channel link or @handle")
+    return f"https://www.youtube.com/{urllib.parse.quote(m.group(1), safe='/@')}/videos"
+
+
+def track(db_path: str, kind: str, value: str, *, yt_dlp: str = "yt-dlp", extra: list[str] | None = None,
+          run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> list[dict]:
+    """Add one topic (a keyword search, remembered) or channel (a pull, repeated by Refresh) and fetch it now."""
+    extra = extra or []
+    value = value.strip()
+    if not value or len(value) > 200 or any(ord(c) < 32 for c in value):
+        raise ValueError("type a topic or a channel first")
+    conn = db.connect(db_path)
+    try:
+        if kind == "topic":
+            r = discover.search(conn, [value], within="today", yt_dlp=yt_dlp, extra=extra)
+            err = r["failed"].get(value)
+            return [{"step": f"Topic: {value}", "ok": not err, "detail": err or "searched and stored"}]
+        if kind == "channel":
+            url = channel_url(value)
+            stored = [yt_dlp, "-J", "--flat-playlist", "--playlist-end", str(CHANNEL_PULL_LIMIT), url]
+            proc = run([stored[0], *extra, *stored[1:]], capture_output=True, text=True, timeout=PULL_TIMEOUT)
+            if proc.returncode != 0:
+                tail = (proc.stderr or "").strip().splitlines()[-1:] or ["no details"]
+                return [{"step": f"Channel: {value}", "ok": False, "detail": f"yt-dlp exited {proc.returncode}: {tail[0]}"}]
+            ingest_text(conn, proc.stdout, command=shlex.join(["yt-dlp", *stored[1:]]))
+            return [{"step": f"Channel: {value}", "ok": True, "detail": "pulled and stored"}]
+        raise ValueError("kind must be topic or channel")
+    finally:
+        conn.close()
 
 
 def make_handler(db_path: str, short_max: int, yt_dlp: str, extra: list[str], output: str | None = None):
@@ -144,22 +191,34 @@ def make_handler(db_path: str, short_max: int, yt_dlp: str, extra: list[str], ou
 
         def do_OPTIONS(self):
             self.send_response(204)
-            if self._host_ok() and self.path == "/refresh":
+            if self._host_ok() and self.path in ("/refresh", "/track"):
                 self._cors()
                 self.send_header("Access-Control-Allow-Methods", "POST")
-                self.send_header("Access-Control-Allow-Headers", GUARD_HEADER)
+                self.send_header("Access-Control-Allow-Headers", f"{GUARD_HEADER}, Content-Type")
             self.send_header("Content-Length", "0")
             self.end_headers()
 
         def do_POST(self):
             if not self._host_ok() or self.headers.get(GUARD_HEADER) != "1":
                 return self._json(403, {"error": "forbidden"})
-            if self.path != "/refresh":
+            if self.path not in ("/refresh", "/track"):
                 return self._json(404, {"error": "not found"})
+            job = None
+            if self.path == "/track":
+                try:
+                    size = int(self.headers.get("Content-Length") or 0)
+                    req = json.loads(self.rfile.read(min(size, 10_000)) or b"{}")
+                    kind, value = str(req.get("kind", "")), str(req.get("value", ""))
+                except (ValueError, AttributeError):
+                    return self._json(400, {"error": "bad request"})
+                job = lambda: track(db_path, kind, value, yt_dlp=yt_dlp, extra=extra)
             if not lock.acquire(blocking=False):
                 return self._json(409, {"error": "a refresh is already running"})
             try:
-                steps = refresh(db_path, yt_dlp=yt_dlp, extra=extra)
+                try:
+                    steps = (job or (lambda: refresh(db_path, yt_dlp=yt_dlp, extra=extra)))()
+                except ValueError as e:
+                    return self._send_cors_json(400, {"error": str(e)})
                 if output:  # so a dashboard.html opened from disk shows the new data on reload
                     conn = db.connect(db_path)
                     try:
@@ -168,8 +227,11 @@ def make_handler(db_path: str, short_max: int, yt_dlp: str, extra: list[str], ou
                         conn.close()
             finally:
                 lock.release()
-            body = json.dumps({"steps": steps, "ok": all(s["ok"] for s in steps)}).encode()
-            self.send_response(200)
+            self._send_cors_json(200, {"steps": steps, "ok": all(s["ok"] for s in steps)})
+
+        def _send_cors_json(self, status: int, obj) -> None:
+            body = json.dumps(obj).encode()
+            self.send_response(status)
             self._cors()
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
